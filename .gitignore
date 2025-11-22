@@ -1,0 +1,219 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+pythonenv*
+.python-version
+
+# Azure Functions
+local.settings.json
+.python_packages/
+.func/
+func-cli/
+*.azurefunctions
+.vscode/
+.vs/
+bin/
+obj/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*.swn
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+*.iml
+*.ipr
+*.iws
+
+# Testing
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+test-results/
+*.log
+
+# Environment and Secrets
+.env.*
+*.env
+!.env.example
+!.env.template
+secrets/
+credentials/
+*.key
+*.pem
+*.pfx
+*.p12
+*.cer
+*.crt
+
+# QuickBase
+qb_token.txt
+quickbase_config.json
+*.qb
+
+# Teams App
+teams-app.zip
+*.zip
+!templates/*.zip
+color.png
+outline.png
+teams_manifest_local.json
+
+# Azure
+azure-pipelines-local.yml
+deployment-local.sh
+*.PublishSettings
+*.pubxml
+*.azureProfile
+azure.err
+azure-error.log
+
+# Application specific
+logs/
+*.log.*
+debug/
+temp/
+tmp/
+cache/
+sessions/
+uploads/
+downloads/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+instance/
+
+# Documentation build
+docs/_build/
+site/
+mkdocs.yml
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# pyenv
+.python-version
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# Local development
+local_test.py
+scratch.py
+test_*.py
+!test_unit.py
+!test_integration.py
+
+# Backup files
+*.bak
+*.backup
+*~
+*.orig
+
+# Package files
+*.tar.gz
+*.rar
+
+# OS generated files
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Node (if using any Node tools)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# Terraform (if using for infrastructure)
+*.tfstate
+*.tfstate.*
+.terraform/
+terraform.tfvars
+*.tfvars
+
+# Docker (if containerizing)
+.dockerignore
+docker-compose.local.yml
+docker-compose.override.yml
+
+# CI/CD
+.github/workflows/local-*.yml
+.gitlab-ci-local.yml
+jenkins-local.xml
+
+# Custom ignore patterns for this project
+it-bot-credentials/
+user_tokens/
+conversation_cache/
+ticket_exports/
+report_outputs/
+ai_training_data/
+feedback_data/
+*.quickbase.csv
+teams_export_*.json
