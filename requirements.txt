@@ -35,3 +35,6 @@ botframework-connector==4.14.3
 
 # Optional: For enhanced async support
 asyncio==3.4.3
+langchain==0.1.0
+langchain-openai==0.0.5
+pydantic>=2.5.0,<3

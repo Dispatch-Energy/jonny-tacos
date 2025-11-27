@@ -18,19 +18,9 @@
     "id": "Microsoft.Azure.Functions.ExtensionBundle",
     "version": "[4.*, 5.0.0)"
   },
-  "functionTimeout": "00:05:00",
-  "httpWorker": {
-    "description": {
-      "defaultExecutablePath": "python",
-      "defaultWorkerPath": "worker.py"
-    }
-  },
   "extensions": {
     "http": {
-      "routePrefix": "api",
-      "maxConcurrentRequests": 100,
-      "maxOutstandingRequests": 200,
-      "dynamicThrottlesEnabled": true
+      "routePrefix": "api"
     }
   }
 }

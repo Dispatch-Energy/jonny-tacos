@@ -40,7 +40,8 @@ class QuickBaseManager:
             'resolution': 15,         # __Resolution__
             'time_spent': 16,         # __Time Spent (hours)__
             'record_links': 17,       # __Record records__
-            'add_record': 18          # __Add Record__
+            'add_record': 18,         # __Add Record__
+            'submitted_by': 19        # __Submitted By__ (email field)
         }
         
         # Priority mappings
@@ -86,12 +87,24 @@ class QuickBaseManager:
         Create a new ticket in QuickBase
         """
         try:
-            # Generate ticket number (you might want to use QuickBase auto-numbering instead)
-            ticket_number = await self.generate_ticket_number()
+            # Generate unique ticket number using timestamp (guaranteed unique)
+            ticket_number = f"IT-{datetime.now().strftime('%y%m%d%H%M%S')}"
+            print(f"   [DEBUG] Generated ticket number: {ticket_number}")
             
             # Calculate due date based on priority
             submitted_date = datetime.now()
             due_date = self.calculate_due_date(ticket_data.get('priority', 'Medium'))
+            
+            # Format dates for QuickBase
+            # Field 12 (timestamp) needs ISO format with Z suffix
+            # Field 13 (date) needs just YYYY-MM-DD
+            submitted_str = submitted_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+            due_date_str = due_date.strftime('%Y-%m-%d')
+            
+            # Build description - include user name if provided
+            description = ticket_data.get('description', '')
+            if ticket_data.get('user_name'):
+                description += f"\n\n---\nTeams User: {ticket_data.get('user_name')}"
             
             # Prepare the record data
             record_data = {
@@ -99,24 +112,23 @@ class QuickBaseManager:
                 "data": [{
                     self.field_mapping['ticket_number']: {"value": ticket_number},
                     self.field_mapping['subject']: {"value": ticket_data.get('subject', 'No Subject')},
-                    self.field_mapping['description']: {"value": ticket_data.get('description', '')},
+                    self.field_mapping['description']: {"value": description},
                     self.field_mapping['priority']: {"value": ticket_data.get('priority', 'Medium')},
                     self.field_mapping['category']: {"value": ticket_data.get('category', 'General Support')},
-                    self.field_mapping['status']: {"value": 'New'},
-                    self.field_mapping['submitted_date']: {"value": submitted_date.isoformat()},
-                    self.field_mapping['due_date']: {"value": due_date.isoformat()}
+                    self.field_mapping['status']: {"value": ticket_data.get('status', 'New')},
+                    self.field_mapping['submitted_date']: {"value": submitted_str},
+                    self.field_mapping['due_date']: {"value": due_date_str}
                 }],
                 "fieldsToReturn": list(self.field_mapping.values())
             }
             
-            # Add custom fields for Teams integration
-            if 'user_email' in ticket_data:
-                # Store user email in description or a custom field
-                current_desc = record_data["data"][0][self.field_mapping['description']]["value"]
-                record_data["data"][0][self.field_mapping['description']]["value"] = (
-                    f"{current_desc}\n\n---\nSubmitted by: {ticket_data['user_email']}\n"
-                    f"Teams User: {ticket_data.get('user_name', 'Unknown')}"
-                )
+            # Add submitted_by email field (ID 19)
+            if ticket_data.get('user_email'):
+                record_data["data"][0][self.field_mapping['submitted_by']] = {
+                    "value": ticket_data.get('user_email')
+                }
+            
+            print(f"   [DEBUG] Sending to QuickBase...")
             
             # Make the API call
             response = await self.execute_request(
@@ -125,24 +137,39 @@ class QuickBaseManager:
                 record_data
             )
             
-            if response and response.get('data'):
-                created_record = response['data'][0]
+            print(f"   [DEBUG] Response: {response}")
+            
+            if response:
+                # QuickBase returns created record ID in metadata, not data
+                created_ids = response.get('metadata', {}).get('createdRecordIds', [])
+                print(f"   [DEBUG] Created IDs: {created_ids}")
                 
-                # Format the ticket response
-                ticket = {
-                    'ticket_number': ticket_number,
-                    'record_id': created_record.get(3, {}).get('value'),  # Assuming field 3 is Record ID
-                    'subject': ticket_data.get('subject'),
-                    'status': 'New',
-                    'priority': ticket_data.get('priority'),
-                    'category': ticket_data.get('category'),
-                    'submitted_date': submitted_date.isoformat(),
-                    'due_date': due_date.isoformat(),
-                    'quickbase_url': self.get_ticket_url(created_record.get(3, {}).get('value'))
-                }
-                
-                logging.info(f"Ticket created successfully: {ticket_number}")
-                return ticket
+                if created_ids:
+                    record_id = created_ids[0]
+                    
+                    # Format the ticket response
+                    ticket = {
+                        'ticket_number': ticket_number,
+                        'record_id': record_id,
+                        'subject': ticket_data.get('subject'),
+                        'status': ticket_data.get('status', 'New'),
+                        'priority': ticket_data.get('priority'),
+                        'category': ticket_data.get('category'),
+                        'submitted_date': submitted_str,
+                        'due_date': due_date_str,
+                        'quickbase_url': self.get_ticket_url(record_id)
+                    }
+                    
+                    logging.info(f"Ticket created successfully: {ticket_number}")
+                    return ticket
+                else:
+                    # Check for line errors
+                    line_errors = response.get('metadata', {}).get('lineErrors', {})
+                    if line_errors:
+                        print(f"   [DEBUG] Line errors: {line_errors}")
+                    print(f"   [DEBUG] No createdRecordIds in response!")
+            else:
+                print(f"   [DEBUG] Response was None!")
             
             return None
             

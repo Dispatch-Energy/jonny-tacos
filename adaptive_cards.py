@@ -695,3 +695,35 @@ class AdaptiveCardBuilder:
             return 'N/A'
         except:
             return 'N/A'
+
+    def create_error_card(self, message: str) -> Dict[str, Any]:
+        """Create error card"""
+        return {
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard",
+            "version": "1.5",
+            "body": [
+                {
+                    "type": "TextBlock",
+                    "text": "❌ Error",
+                    "weight": "Bolder",
+                    "size": "Medium",
+                    "color": "Attention"
+                },
+                {
+                    "type": "TextBlock",
+                    "text": message,
+                    "wrap": True,
+                    "spacing": "Medium"
+                }
+            ],
+            "actions": [
+                {
+                    "type": "Action.Submit",
+                    "title": "🎫 Create Ticket",
+                    "data": {
+                        "action": "create_ticket"
+                    }
+                }
+            ]
+        }

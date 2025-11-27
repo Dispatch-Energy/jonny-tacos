@@ -34,7 +34,7 @@ env.bak/
 venv.bak/
 pythonenv*
 .python-version
-
+teams_package/
 # Azure Functions
 local.settings.json
 .python_packages/

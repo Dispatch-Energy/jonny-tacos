@@ -2,81 +2,67 @@
     "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
     "manifestVersion": "1.16",
     "version": "1.0.0",
-    "id": "YOUR_APP_ID_HERE",
-    "packageName": "com.yourcompany.itsupportbot",
+    "id": "{{APP_ID}}",
+    "packageName": "com.dispatchenergy.itsupportbot",
     "developer": {
-        "name": "IT Ticket Bot",
-        "websiteUrl": "https://www.yourcompany.com",
-        "privacyUrl": "https://www.yourcompany.com/privacy",
-        "termsOfUseUrl": "https://www.yourcompany.com/terms"
-    },
-    "icons": {
-        "color": "color.png",
-        "outline": "outline.png"
+      "name": "Dispatch Energy",
+      "websiteUrl": "https://www.dispatchenergy.com/",
+      "privacyUrl": "https://www.dispatchenergy.com/privacy",
+      "termsOfUseUrl": "https://www.dispatchenergy.com/terms"
     },
     "name": {
-        "short": "IT Support Bot",
-        "full": "IT Service Desk Support Bot"
+      "short": "IT Support",
+      "full": "IT Support Assistant Bot"
     },
     "description": {
-        "short": "AI-powered IT support assistant",
-        "full": "An intelligent IT support bot that helps employees resolve technical issues, create support tickets, and get instant answers to common IT questions using GPT-5 technology."
+      "short": "AI-powered IT help desk assistant",
+      "full": "An intelligent IT support bot that helps resolve common technical issues, creates support tickets, and provides instant solutions for password resets, VPN problems, Teams issues, and more."
+    },
+    "icons": {
+      "color": "color.png",
+      "outline": "outline.png"
     },
     "accentColor": "#0078D4",
     "bots": [
-        {
-            "botId": "YOUR_TEAMS_APP_ID",
-            "scopes": [
-                "personal",
-                "team",
-                "groupchat"
-            ],
-            "supportsFiles": false,
-            "isNotificationOnly": false,
-            "commandLists": [
-                {
-                    "scopes": [
-                        "personal",
-                        "team",
-                        "groupchat"
-                    ],
-                    "commands": [
-                        {
-                            "title": "help",
-                            "description": "Show available commands and how to use the bot"
-                        },
-                        {
-                            "title": "ticket",
-                            "description": "Create a new IT support ticket"
-                        },
-                        {
-                            "title": "status",
-                            "description": "Check the status of your support tickets"
-                        },
-                        {
-                            "title": "resolve",
-                            "description": "[IT Admin] Resolve a ticket with a solution"
-                        },
-                        {
-                            "title": "stats",
-                            "description": "[IT Admin] View IT support dashboard statistics"
-                        }
-                    ]
-                }
+      {
+        "botId": "{{BOT_ID}}",
+        "scopes": [
+          "personal",
+          "team",
+          "groupchat"
+        ],
+        "supportsFiles": false,
+        "isNotificationOnly": false,
+        "supportsCalling": false,
+        "supportsVideo": false,
+        "commandLists": [
+          {
+            "scopes": ["personal", "team", "groupchat"],
+            "commands": [
+              {
+                "title": "help",
+                "description": "Show available commands and how to use the bot"
+              },
+              {
+                "title": "ticket",
+                "description": "Create a new IT support ticket"
+              },
+              {
+                "title": "status",
+                "description": "Check status of your support tickets"
+              },
+              {
+                "title": "stats",
+                "description": "View IT support statistics (admin)"
+              }
             ]
-        }
+          }
+        ]
+      }
     ],
     "permissions": [
-        "identity",
-        "messageTeamMembers"
+      "identity",
+      "messageTeamMembers"
     ],
-    "validDomains": [
-        "*.azurewebsites.net",
-        "*.quickbase.com",
-        "teams.microsoft.com"
-    ],
-    "webApplicationInfo": {
-        "id": "YOUR_TEAMS_APP_ID",
-        "resource": "api://YOUR_FUNCTION_APP_NAME.azurewebsites.net/YOUR_TEAMS_APP_ID"
-    }
-}
+    "validDomains": []
+  }
