@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IT Support Bot - User Guide</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            background: #fff;
+        }
+
+        /* Print styles */
+        @media print {
+            body {
+                padding: 20px;
+                font-size: 11pt;
+            }
+            .page-break {
+                page-break-before: always;
+            }
+            .no-print {
+                display: none;
+            }
+            h1, h2, h3 {
+                page-break-after: avoid;
+            }
+            .step-box, .tip-box, .warning-box {
+                page-break-inside: avoid;
+            }
+        }
+
+        /* Cover page */
+        .cover {
+            text-align: center;
+            padding: 60px 20px;
+            border-bottom: 3px solid #0078d4;
+            margin-bottom: 40px;
+        }
+
+        .cover h1 {
+            font-size: 2.5em;
+            color: #0078d4;
+            margin-bottom: 10px;
+        }
+
+        .cover .subtitle {
+            font-size: 1.3em;
+            color: #666;
+            margin-bottom: 30px;
+        }
+
+        .cover .version {
+            font-size: 0.9em;
+            color: #999;
+        }
+
+        .logo-placeholder {
+            width: 120px;
+            height: 120px;
+            background: linear-gradient(135deg, #0078d4 0%, #00a2ed 100%);
+            border-radius: 20px;
+            margin: 0 auto 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 3em;
+            font-weight: bold;
+        }
+
+        /* Table of contents */
+        .toc {
+            background: #f8f9fa;
+            padding: 25px 30px;
+            border-radius: 8px;
+            margin-bottom: 40px;
+        }
+
+        .toc h2 {
+            color: #0078d4;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+
+        .toc ul {
+            list-style: none;
+        }
+
+        .toc li {
+            padding: 8px 0;
+            border-bottom: 1px dotted #ddd;
+        }
+
+        .toc li:last-child {
+            border-bottom: none;
+        }
+
+        .toc a {
+            color: #333;
+            text-decoration: none;
+        }
+
+        .toc a:hover {
+            color: #0078d4;
+        }
+
+        /* Section styling */
+        section {
+            margin-bottom: 40px;
+        }
+
+        h2 {
+            color: #0078d4;
+            font-size: 1.5em;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #0078d4;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            color: #444;
+            font-size: 1.2em;
+            margin: 25px 0 15px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        /* Step boxes */
+        .step-box {
+            background: #f0f7ff;
+            border-left: 4px solid #0078d4;
+            padding: 15px 20px;
+            margin: 15px 0;
+            border-radius: 0 8px 8px 0;
+        }
+
+        .step-box .step-number {
+            background: #0078d4;
+            color: white;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 10px;
+            font-size: 0.9em;
+        }
+
+        .step-box .step-title {
+            font-weight: 600;
+            color: #0078d4;
+        }
+
+        .step-box p {
+            margin: 10px 0 0 38px;
+            color: #555;
+        }
+
+        /* Tip boxes */
+        .tip-box {
+            background: #e8f5e9;
+            border-left: 4px solid #4caf50;
+            padding: 15px 20px;
+            margin: 15px 0;
+            border-radius: 0 8px 8px 0;
+        }
+
+        .tip-box::before {
+            content: "TIP: ";
+            font-weight: bold;
+            color: #4caf50;
+        }
+
+        /* Warning boxes */
+        .warning-box {
+            background: #fff3e0;
+            border-left: 4px solid #ff9800;
+            padding: 15px 20px;
+            margin: 15px 0;
+            border-radius: 0 8px 8px 0;
+        }
+
+        .warning-box::before {
+            content: "NOTE: ";
+            font-weight: bold;
+            color: #ff9800;
+        }
+
+        /* Command styling */
+        .command {
+            background: #2d2d2d;
+            color: #fff;
+            padding: 12px 18px;
+            border-radius: 6px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            margin: 10px 0;
+            display: inline-block;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+
+        th {
+            background: #0078d4;
+            color: white;
+        }
+
+        tr:nth-child(even) {
+            background: #f8f9fa;
+        }
+
+        /* Example conversations */
+        .conversation {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 15px 0;
+        }
+
+        .message {
+            margin: 10px 0;
+            padding: 12px 16px;
+            border-radius: 18px;
+            max-width: 80%;
+        }
+
+        .user-message {
+            background: #0078d4;
+            color: white;
+            margin-left: auto;
+            text-align: right;
+        }
+
+        .bot-message {
+            background: #e8e8e8;
+            color: #333;
+        }
+
+        .message-label {
+            font-size: 0.75em;
+            color: #888;
+            margin-bottom: 5px;
+        }
+
+        /* Screenshot placeholder */
+        .screenshot {
+            background: #f0f0f0;
+            border: 2px dashed #ccc;
+            padding: 40px;
+            text-align: center;
+            color: #888;
+            margin: 20px 0;
+            border-radius: 8px;
+        }
+
+        /* Button styling */
+        .button-example {
+            display: inline-block;
+            padding: 8px 16px;
+            margin: 5px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+
+        .button-primary {
+            background: #0078d4;
+            color: white;
+        }
+
+        .button-secondary {
+            background: #f0f0f0;
+            color: #333;
+            border: 1px solid #ddd;
+        }
+
+        /* FAQ styling */
+        .faq-item {
+            margin: 20px 0;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .faq-question {
+            font-weight: 600;
+            color: #0078d4;
+            margin-bottom: 10px;
+        }
+
+        /* Footer */
+        footer {
+            margin-top: 60px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            text-align: center;
+            color: #888;
+            font-size: 0.9em;
+        }
+
+        /* Lists */
+        ul, ol {
+            margin: 15px 0 15px 25px;
+        }
+
+        li {
+            margin: 8px 0;
+        }
+    </style>
+</head>
+<body>
+    <!-- Cover Page -->
+    <div class="cover">
+        <div class="logo-placeholder">IT</div>
+        <h1>IT Support Bot</h1>
+        <p class="subtitle">User Guide & Standard Operating Procedures</p>
+        <p class="version">Version 1.0 | January 2026</p>
+    </div>
+
+    <!-- Table of Contents -->
+    <nav class="toc">
+        <h2>Table of Contents</h2>
+        <ul>
+            <li><a href="#introduction">1. Introduction</a></li>
+            <li><a href="#getting-started">2. Getting Started</a></li>
+            <li><a href="#asking-questions">3. Asking Questions</a></li>
+            <li><a href="#creating-tickets">4. Creating Support Tickets</a></li>
+            <li><a href="#checking-status">5. Checking Ticket Status</a></li>
+            <li><a href="#commands">6. Available Commands</a></li>
+            <li><a href="#common-issues">7. Common Issues the Bot Can Help With</a></li>
+            <li><a href="#examples">8. Example Conversations</a></li>
+            <li><a href="#faq">9. Frequently Asked Questions</a></li>
+            <li><a href="#contact">10. Getting Additional Help</a></li>
+        </ul>
+    </nav>
+
+    <!-- Section 1: Introduction -->
+    <section id="introduction">
+        <h2>1. Introduction</h2>
+
+        <p>Welcome to the IT Support Bot! This guide will help you use our automated IT support assistant to get quick answers to your technical questions and create support tickets when needed.</p>
+
+        <h3>What is the IT Support Bot?</h3>
+        <p>The IT Support Bot is an intelligent assistant that lives inside Microsoft Teams. It's designed to:</p>
+        <ul>
+            <li><strong>Answer your IT questions instantly</strong> - Get help 24/7 without waiting</li>
+            <li><strong>Provide step-by-step troubleshooting</strong> - Follow easy instructions to fix common problems</li>
+            <li><strong>Create support tickets</strong> - When you need human IT help, the bot creates a ticket for you</li>
+            <li><strong>Track your requests</strong> - Check the status of your support tickets anytime</li>
+        </ul>
+
+        <div class="tip-box">
+            The bot is available 24 hours a day, 7 days a week. You can get instant help even outside of normal business hours!
+        </div>
+    </section>
+
+    <!-- Section 2: Getting Started -->
+    <section id="getting-started" class="page-break">
+        <h2>2. Getting Started</h2>
+
+        <h3>How to Find the IT Support Bot</h3>
+
+        <div class="step-box">
+            <span class="step-number">1</span>
+            <span class="step-title">Open Microsoft Teams</span>
+            <p>Launch the Microsoft Teams application on your computer or open it in your web browser.</p>
+        </div>
+
+        <div class="step-box">
+            <span class="step-number">2</span>
+            <span class="step-title">Go to Chat</span>
+            <p>Click on "Chat" in the left sidebar of Teams.</p>
+        </div>
+
+        <div class="step-box">
+            <span class="step-number">3</span>
+            <span class="step-title">Start a New Chat</span>
+            <p>Click the "New Chat" button (pencil icon) at the top of the chat list.</p>
+        </div>
+
+        <div class="step-box">
+            <span class="step-number">4</span>
+            <span class="step-title">Search for the Bot</span>
+            <p>In the "To:" field, type <strong>"IT Support Bot"</strong> and select it from the list that appears.</p>
+        </div>
+
+        <div class="step-box">
+            <span class="step-number">5</span>
+            <span class="step-title">Start Chatting</span>
+            <p>You're ready! Simply type your question or describe your issue and press Enter.</p>
+        </div>
+
+        <div class="warning-box">
+            If you can't find the IT Support Bot, contact your IT department to ensure it has been installed for your organization.
+        </div>
+    </section>
+
+    <!-- Section 3: Asking Questions -->
+    <section id="asking-questions" class="page-break">
+        <h2>3. Asking Questions</h2>
+
+        <p>The easiest way to use the IT Support Bot is to simply ask your question in plain English, just like you would ask a coworker.</p>
+
+        <h3>How to Ask for Help</h3>
+
+        <div class="step-box">
+            <span class="step-number">1</span>
+            <span class="step-title">Type Your Question</span>
+            <p>Describe your problem or question in the chat. Be specific about what's happening.</p>
+        </div>
+
+        <div class="step-box">
+            <span class="step-number">2</span>
+            <span class="step-title">Read the Response</span>
+            <p>The bot will provide troubleshooting steps or information to help solve your issue.</p>
+        </div>
+
+        <div class="step-box">
+            <span class="step-number">3</span>
+            <span class="step-title">Follow the Steps</span>
+            <p>Try the suggested solutions one at a time.</p>
+        </div>
+
+        <div class="step-box">
+            <span class="step-number">4</span>
+            <span class="step-title">Provide Feedback</span>
+            <p>Click <span class="button-example button-primary">This Helped</span> if the solution worked, or <span class="button-example button-secondary">Still Need Help</span> if you need more assistance.</p>
+        </div>
+
+        <h3>Tips for Better Results</h3>
+        <ul>
+            <li><strong>Be specific</strong> - "Outlook won't open" is better than "email broken"</li>
+            <li><strong>Include error messages</strong> - If you see an error, include the exact text</li>
+            <li><strong>Mention what you've tried</strong> - "I already restarted my computer"</li>
+            <li><strong>One issue at a time</strong> - Ask about one problem per conversation</li>
+        </ul>
+
+        <div class="tip-box">
+            You don't need to use special commands or technical language. Just type naturally and the bot will understand!
+        </div>
+    </section>
+
+    <!-- Section 4: Creating Tickets -->
+    <section id="creating-tickets" class="page-break">
+        <h2>4. Creating Support Tickets</h2>
+
+        <p>When the bot's suggestions don't solve your problem, or if you need hands-on IT assistance, you can create a support ticket.</p>
+
+        <h3>Method 1: Click "Still Need Help"</h3>
+        <p>After the bot provides a solution, click the <span class="button-example button-secondary">Still Need Help</span> button. A ticket form will appear.</p>
+
+        <h3>Method 2: Use the Ticket Command</h3>
+        <p>Type the following command to open the ticket form directly:</p>
+        <div class="command">/ticket</div>
+
+        <h3>Filling Out the Ticket Form</h3>
+
+        <table>
+            <tr>
+                <th>Field</th>
+                <th>What to Enter</th>
+            </tr>
+            <tr>
+                <td><strong>Category</strong></td>
+                <td>Select the type of issue (Password, Software, Hardware, etc.)</td>
+            </tr>
+            <tr>
+                <td><strong>Priority</strong></td>
+                <td>
+                    <strong>Low</strong> - Not urgent, can wait<br>
+                    <strong>Medium</strong> - Affects your work but has workaround<br>
+                    <strong>High</strong> - Significantly impacts your work<br>
+                    <strong>Critical</strong> - Complete work stoppage
+                </td>
+            </tr>
+            <tr>
+                <td><strong>Subject</strong></td>
+                <td>Brief description of the issue (e.g., "Cannot print to 3rd floor printer")</td>
+            </tr>
+            <tr>
+                <td><strong>Description</strong></td>
+                <td>Detailed explanation of the problem, what you've tried, and any error messages</td>
+            </tr>
+        </table>
+
+        <div class="warning-box">
+            Please select the appropriate priority level. Marking all tickets as "Critical" delays response to actual emergencies.
+        </div>
+
+        <h3>After Submitting</h3>
+        <p>You will receive a confirmation with your <strong>ticket number</strong> (e.g., IT-0042). Keep this number to check your ticket status later.</p>
+    </section>
+
+    <!-- Section 5: Checking Status -->
+    <section id="checking-status" class="page-break">
+        <h2>5. Checking Ticket Status</h2>
+
+        <p>Want to know what's happening with your support request? Use the status command to check.</p>
+
+        <h3>How to Check Status</h3>
+
+        <p>Type the following command, replacing the ticket number with your own:</p>
+        <div class="command">/status IT-0042</div>
+
+        <h3>Understanding Ticket Status</h3>
+
+        <table>
+            <tr>
+                <th>Status</th>
+                <th>What It Means</th>
+            </tr>
+            <tr>
+                <td><strong>New</strong></td>
+                <td>Your ticket has been received and is waiting to be assigned</td>
+            </tr>
+            <tr>
+                <td><strong>In Progress</strong></td>
+                <td>An IT team member is actively working on your issue</td>
+            </tr>
+            <tr>
+                <td><strong>Awaiting User</strong></td>
+                <td>IT needs more information or action from you</td>
+            </tr>
+            <tr>
+                <td><strong>Awaiting IT</strong></td>
+                <td>Waiting for IT resources or third-party assistance</td>
+            </tr>
+            <tr>
+                <td><strong>Resolved</strong></td>
+                <td>The issue has been fixed - please verify it works for you</td>
+            </tr>
+            <tr>
+                <td><strong>Closed</strong></td>
+                <td>The ticket has been completed and closed</td>
+            </tr>
+        </table>
+
+        <div class="tip-box">
+            If your ticket status is "Awaiting User," check your email or Teams messages - IT may have sent you a question or instructions!
+        </div>
+    </section>
+
+    <!-- Section 6: Commands -->
+    <section id="commands" class="page-break">
+        <h2>6. Available Commands</h2>
+
+        <p>While you can chat naturally with the bot, these commands provide quick access to specific features:</p>
+
+        <table>
+            <tr>
+                <th>Command</th>
+                <th>What It Does</th>
+            </tr>
+            <tr>
+                <td><div class="command">/help</div></td>
+                <td>Shows a list of available commands and how to use the bot</td>
+            </tr>
+            <tr>
+                <td><div class="command">/ticket</div></td>
+                <td>Opens the form to create a new support ticket</td>
+            </tr>
+            <tr>
+                <td><div class="command">/status [ticket#]</div></td>
+                <td>Checks the status of a specific ticket (e.g., /status IT-0042)</td>
+            </tr>
+        </table>
+
+        <div class="tip-box">
+            Commands start with a forward slash (/). Make sure there's no space before the slash!
+        </div>
+    </section>
+
+    <!-- Section 7: Common Issues -->
+    <section id="common-issues" class="page-break">
+        <h2>7. Common Issues the Bot Can Help With</h2>
+
+        <p>The IT Support Bot is trained to help with many common IT issues. Here are some topics you can ask about:</p>
+
+        <h3>Password & Login</h3>
+        <ul>
+            <li>Forgot password / need to reset password</li>
+            <li>Account locked out</li>
+            <li>Two-factor authentication issues</li>
+            <li>Can't log into a specific application</li>
+        </ul>
+
+        <h3>Email (Outlook)</h3>
+        <ul>
+            <li>Outlook won't open or keeps crashing</li>
+            <li>Emails not syncing</li>
+            <li>Can't send or receive emails</li>
+            <li>Calendar issues</li>
+            <li>Out of office setup</li>
+        </ul>
+
+        <h3>Microsoft Teams</h3>
+        <ul>
+            <li>Audio or microphone not working</li>
+            <li>Video/camera problems</li>
+            <li>Can't join meetings</li>
+            <li>Screen sharing issues</li>
+            <li>Teams running slowly</li>
+        </ul>
+
+        <h3>VPN (Remote Access)</h3>
+        <ul>
+            <li>VPN won't connect</li>
+            <li>VPN keeps disconnecting</li>
+            <li>Slow connection through VPN</li>
+            <li>Can't access files when working remotely</li>
+        </ul>
+
+        <h3>Printing</h3>
+        <ul>
+            <li>Printer not showing up</li>
+            <li>Print jobs stuck in queue</li>
+            <li>Printing blank pages</li>
+            <li>Adding a new printer</li>
+        </ul>
+
+        <h3>Computer Performance</h3>
+        <ul>
+            <li>Computer running slow</li>
+            <li>Programs freezing or crashing</li>
+            <li>Running out of disk space</li>
+            <li>Computer won't start properly</li>
+        </ul>
+
+        <h3>Software</h3>
+        <ul>
+            <li>How to install approved software</li>
+            <li>Software updates needed</li>
+            <li>Application errors</li>
+            <li>Requesting new software</li>
+        </ul>
+
+        <h3>Network & WiFi</h3>
+        <ul>
+            <li>WiFi not connecting</li>
+            <li>Internet is slow</li>
+            <li>Can't access shared drives</li>
+            <li>Website blocked</li>
+        </ul>
+    </section>
+
+    <!-- Section 8: Examples -->
+    <section id="examples" class="page-break">
+        <h2>8. Example Conversations</h2>
+
+        <h3>Example 1: Password Reset</h3>
+        <div class="conversation">
+            <div class="message-label">You:</div>
+            <div class="message user-message">I forgot my password and can't log in</div>
+
+            <div class="message-label">IT Support Bot:</div>
+            <div class="message bot-message">
+                I can help you reset your password! Here's how:<br><br>
+                <strong>Step 1:</strong> Go to the login page and click "Forgot Password"<br>
+                <strong>Step 2:</strong> Enter your work email address<br>
+                <strong>Step 3:</strong> Check your personal email for a reset link<br>
+                <strong>Step 4:</strong> Click the link and create a new password<br><br>
+                Your new password must be at least 12 characters with uppercase, lowercase, and a number.<br><br>
+                <em>Did this help solve your issue?</em>
+            </div>
+        </div>
+
+        <h3>Example 2: Teams Audio Problem</h3>
+        <div class="conversation">
+            <div class="message-label">You:</div>
+            <div class="message user-message">People can't hear me in Teams meetings</div>
+
+            <div class="message-label">IT Support Bot:</div>
+            <div class="message bot-message">
+                Let's fix your Teams microphone issue:<br><br>
+                <strong>Quick Checks:</strong><br>
+                1. Make sure you're not muted (look for the microphone icon)<br>
+                2. Check if your headset is plugged in properly<br><br>
+                <strong>If still not working:</strong><br>
+                1. Click your profile picture in Teams<br>
+                2. Go to Settings > Devices<br>
+                3. Under Microphone, select your correct device<br>
+                4. Click "Make a test call" to verify<br><br>
+                <em>Did this help solve your issue?</em>
+            </div>
+        </div>
+
+        <h3>Example 3: Creating a Ticket</h3>
+        <div class="conversation">
+            <div class="message-label">You:</div>
+            <div class="message user-message">/ticket</div>
+
+            <div class="message-label">IT Support Bot:</div>
+            <div class="message bot-message">
+                <strong>Create Support Ticket</strong><br><br>
+                Please fill out the form below:<br>
+                - Category: [Select one]<br>
+                - Priority: [Select one]<br>
+                - Subject: [Enter subject]<br>
+                - Description: [Enter details]<br><br>
+                [Submit Ticket]
+            </div>
+
+            <div class="message-label">After submitting:</div>
+            <div class="message bot-message">
+                Your ticket has been created!<br><br>
+                <strong>Ticket Number:</strong> IT-0042<br>
+                <strong>Status:</strong> New<br>
+                <strong>Priority:</strong> Medium<br><br>
+                An IT team member will review your request shortly. You can check the status anytime by typing: /status IT-0042
+            </div>
+        </div>
+    </section>
+
+    <!-- Section 9: FAQ -->
+    <section id="faq" class="page-break">
+        <h2>9. Frequently Asked Questions</h2>
+
+        <div class="faq-item">
+            <div class="faq-question">Q: Is the bot available 24/7?</div>
+            <p>Yes! The IT Support Bot is available around the clock. You can get instant help and create tickets anytime. However, tickets requiring human IT assistance will be addressed during business hours.</p>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-question">Q: Does the bot replace the IT Help Desk?</div>
+            <p>No, the bot works alongside your IT team. It handles simple, common issues instantly and creates tickets for complex problems that need human expertise.</p>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-question">Q: Can the bot access my computer or files?</div>
+            <p>No, the bot cannot access your computer, view your screen, or look at your files. It only provides instructions and guidance that you follow yourself.</p>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-question">Q: What if the bot's solution doesn't work?</div>
+            <p>Click the "Still Need Help" button or type /ticket to create a support ticket. A human IT team member will then assist you.</p>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-question">Q: How do I know if my ticket was received?</div>
+            <p>After submitting a ticket, you'll receive an immediate confirmation with a ticket number. You can also use /status [ticket number] to verify.</p>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-question">Q: Can I update a ticket I already submitted?</div>
+            <p>To add information to an existing ticket, simply mention your ticket number and the additional details when chatting with the bot, or reply to any email notifications about your ticket.</p>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-question">Q: What if I have an emergency IT issue?</div>
+            <p>For critical issues affecting multiple people or causing complete work stoppage, create a ticket with "Critical" priority. For life-safety emergencies, contact your building security or emergency services.</p>
+        </div>
+
+        <div class="faq-item">
+            <div class="faq-question">Q: Is my conversation with the bot private?</div>
+            <p>Your direct messages with the bot are between you and the IT system. However, ticket information is visible to IT staff who need it to resolve your issues.</p>
+        </div>
+    </section>
+
+    <!-- Section 10: Contact -->
+    <section id="contact" class="page-break">
+        <h2>10. Getting Additional Help</h2>
+
+        <p>If you need assistance beyond what the IT Support Bot can provide:</p>
+
+        <h3>Create a Ticket</h3>
+        <p>The best way to get IT help is to create a ticket through the bot using <span class="command">/ticket</span>. This ensures your request is tracked and assigned to the right person.</p>
+
+        <h3>Contact IT Directly</h3>
+        <p>For urgent matters or if you cannot access Teams:</p>
+        <ul>
+            <li><strong>Email:</strong> helpdesk@yourcompany.com</li>
+            <li><strong>Phone:</strong> (555) 123-4567</li>
+            <li><strong>Hours:</strong> Monday - Friday, 8:00 AM - 6:00 PM</li>
+        </ul>
+
+        <div class="warning-box">
+            The contact information above is a placeholder. Please update with your organization's actual IT contact details.
+        </div>
+
+        <h3>Feedback</h3>
+        <p>We're always working to improve the IT Support Bot. If you have suggestions or feedback, please let your IT department know!</p>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <p><strong>IT Support Bot User Guide</strong></p>
+        <p>Version 1.0 | Last Updated: January 2026</p>
+        <p>For internal use only</p>
+        <br>
+        <p class="no-print"><em>To save as PDF: Press Ctrl+P (or Cmd+P on Mac) and select "Save as PDF"</em></p>
+    </footer>
+</body>
+</html>
