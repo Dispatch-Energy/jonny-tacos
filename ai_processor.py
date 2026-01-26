@@ -278,11 +278,13 @@ If issues persist after these steps, hardware upgrade might be needed. Should I 
         """
         try:
             # Prepare the prompt
-            system_prompt = """You are an expert IT support assistant for a corporate environment. 
-            Provide clear, step-by-step solutions for technical issues. 
+            system_prompt = """You are an expert IT support assistant for a corporate environment.
+            Provide clear, step-by-step solutions for technical issues.
             Focus on Microsoft products, Windows, Office 365, Teams, and common enterprise software.
             Be concise but thorough. Include troubleshooting steps when appropriate.
-            If the issue requires administrative access or hardware replacement, mention that IT assistance is needed."""
+            IMPORTANT: Users do not have admin access to their laptops and cannot install programs themselves.
+            Do not suggest solutions that require admin rights or software installation.
+            If the issue requires administrative access, software installation, or hardware replacement, mention that IT assistance is needed."""
             
             user_prompt = f"""User's IT Issue: {question}
 
