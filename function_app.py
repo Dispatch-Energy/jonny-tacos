@@ -7,7 +7,7 @@ Flow:
 2. Search vector store + static KB → Get relevant context
 3. GPT ALWAYS generates response (with or without context)
 4. ALWAYS respond to user with solution
-5. Create a ticket for tracking (skip for thread replies to avoid duplicates)
+5. Create ticket (AI checks if follow-up to existing ticket to avoid duplicates)
 """
 
 import azure.functions as func
@@ -112,17 +112,37 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         if user_message.startswith('/'):
             return await handle_command(user_message, user_info, activity)
 
-        # Check if this is a reply in an existing thread
-        # If replyToId exists, this is a follow-up message - don't create a new ticket
-        is_thread_reply = activity.get('replyToId') is not None
-        if is_thread_reply:
-            logging.info("Message is a reply in existing thread - will skip ticket creation")
-
         # Show typing indicator while processing
         await teams.send_typing_indicator(activity)
 
+        # Check if this is a follow-up to an existing ticket using AI
+        skip_ticket = False
+        user_email = user_info.get('email') or user_info.get('userPrincipalName', '')
+
+        if user_email:
+            try:
+                qb = get_qb_manager()
+                chain = get_support_chain()
+
+                # Get user's recent open tickets
+                recent_tickets = await qb.get_user_tickets(user_email)
+
+                if recent_tickets:
+                    # Use AI to determine if this is a follow-up
+                    followup_result = chain.is_follow_up(user_message, recent_tickets)
+                    skip_ticket = followup_result.get('is_follow_up', False)
+
+                    if skip_ticket:
+                        related = followup_result.get('related_ticket', 'existing ticket')
+                        logging.info(f"AI detected follow-up to {related}: {followup_result.get('reasoning')}")
+                    else:
+                        logging.info(f"AI detected new issue: {followup_result.get('reasoning')}")
+            except Exception as e:
+                logging.warning(f"Follow-up check failed, will create ticket: {e}")
+                skip_ticket = False
+
         # Process through LangChain support chain
-        return await handle_support_question(user_message, user_info, activity, skip_ticket=is_thread_reply)
+        return await handle_support_question(user_message, user_info, activity, skip_ticket=skip_ticket)
         
     except Exception as e:
         logging.error(f"Error handling message: {str(e)}")

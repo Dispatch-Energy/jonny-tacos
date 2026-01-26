@@ -89,6 +89,13 @@ class SupportResponse(BaseModel):
     sources_used: List[str] = Field(default_factory=list, description="KB sources")
 
 
+class FollowUpCheck(BaseModel):
+    """Determines if a message is a follow-up to an existing ticket"""
+    is_follow_up: bool = Field(description="True if this message relates to an existing ticket")
+    related_ticket: Optional[str] = Field(default=None, description="Ticket number if follow-up")
+    reasoning: str = Field(description="Brief explanation of the decision")
+
+
 # ============================================================================
 # KNOWLEDGE BASE (Static - simple and stable)
 # ============================================================================
@@ -265,7 +272,34 @@ Remember: Users want solutions, not apologies."""),
 
 Provide a helpful response. If this requires IT follow-up, still give the user something useful to try first.""")
         ])
-        
+
+        # Follow-up detection prompt
+        self.followup_parser = PydanticOutputParser(pydantic_object=FollowUpCheck)
+        self.followup_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You determine if a user's message is a follow-up to an existing support ticket or a new issue.
+
+A message is a FOLLOW-UP if:
+- It refers to the same problem/topic as an existing ticket
+- It's providing additional info about an ongoing issue
+- It's asking for status or saying "it's still not working"
+- It's a short response like "thanks", "ok", "still broken", "that didn't work"
+- It's answering a question the bot might have asked
+
+A message is a NEW ISSUE if:
+- It's about a completely different topic/system than existing tickets
+- The user explicitly says "new issue" or "different problem"
+- No existing tickets match the topic at all
+
+When in doubt, lean toward marking as follow-up to avoid duplicate tickets.
+{format_instructions}"""),
+            ("human", """User's new message: "{message}"
+
+User's recent open tickets:
+{recent_tickets}
+
+Is this message a follow-up to an existing ticket or a new issue?""")
+        ])
+
         logging.info("ITSupportChain initialized")
     
     def process(self, question: str) -> Dict[str, Any]:
@@ -402,6 +436,62 @@ Provide a helpful response. If this requires IT follow-up, still give the user s
 A ticket has been created for IT to review your specific issue: "{question[:100]}..."
 
 An IT team member will follow up shortly."""
+
+    def is_follow_up(self, message: str, recent_tickets: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Check if a message is a follow-up to an existing ticket.
+
+        Args:
+            message: The user's new message
+            recent_tickets: List of user's recent open tickets with subject/description
+
+        Returns:
+            Dict with is_follow_up (bool), related_ticket (str or None), reasoning (str)
+        """
+        # If no recent tickets, it's definitely a new issue
+        if not recent_tickets:
+            return {
+                "is_follow_up": False,
+                "related_ticket": None,
+                "reasoning": "No recent tickets found for this user"
+            }
+
+        # Format tickets for the prompt
+        tickets_text = "\n".join([
+            f"- {t.get('ticket_number', 'N/A')}: {t.get('subject', 'No subject')} ({t.get('status', 'Unknown')})"
+            for t in recent_tickets[:5]  # Limit to 5 most recent
+        ])
+
+        try:
+            chain = self.followup_prompt | self.router_llm | self.followup_parser
+            result = chain.invoke({
+                "message": message,
+                "recent_tickets": tickets_text,
+                "format_instructions": self.followup_parser.get_format_instructions()
+            })
+
+            logging.info(f"Follow-up check: is_follow_up={result.is_follow_up}, reason={result.reasoning}")
+
+            return {
+                "is_follow_up": result.is_follow_up,
+                "related_ticket": result.related_ticket,
+                "reasoning": result.reasoning
+            }
+
+        except Exception as e:
+            logging.error(f"Follow-up check failed: {e}")
+            # On error, assume it's a follow-up to be safe (avoid duplicate tickets)
+            if recent_tickets:
+                return {
+                    "is_follow_up": True,
+                    "related_ticket": recent_tickets[0].get('ticket_number'),
+                    "reasoning": f"Error in follow-up check, defaulting to follow-up: {str(e)}"
+                }
+            return {
+                "is_follow_up": False,
+                "related_ticket": None,
+                "reasoning": f"Error in follow-up check: {str(e)}"
+            }
 
 
 # ============================================================================
