@@ -256,6 +256,7 @@ RULES:
 4. Be specific with commands, paths, and steps
 5. Keep responses concise but complete
 6. If the issue genuinely needs human IT (hardware, licenses, admin), say so but still provide what the user CAN do
+7. NEVER mention or reference any IT Service Portal, ticketing portal, or external URLs for logging tickets - there is no such portal. Users create tickets through this bot using /ticket command.
 
 Context from knowledge base:
 {kb_context}
