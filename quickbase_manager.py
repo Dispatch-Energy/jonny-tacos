@@ -205,11 +205,11 @@ class QuickBaseManager:
 
     async def get_user_tickets(self, user_email: str, status_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
-        Get all tickets for a specific user
+        Get all tickets for a specific user by their email in Submitted By field (ID 19)
         """
         try:
-            # Build the query
-            where_clause = f"{{{self.field_mapping['description']}.CT.'{user_email}'}}"
+            # Build the query - search by submitted_by field (ID 19)
+            where_clause = f"{{{self.field_mapping['submitted_by']}.EX.'{user_email}'}}"
             
             if status_filter:
                 status_conditions = " OR ".join([
@@ -442,6 +442,7 @@ class QuickBaseManager:
                 'resolved_date': record.get(str(self.field_mapping['resolved_date']), {}).get('value'),
                 'resolution': record.get(str(self.field_mapping['resolution']), {}).get('value'),
                 'time_spent': record.get(str(self.field_mapping['time_spent']), {}).get('value'),
+                'submitted_by': record.get(str(self.field_mapping['submitted_by']), {}).get('value'),
                 'quickbase_url': self.get_ticket_url(record.get('3', {}).get('value'))
             }
         except Exception as e:
