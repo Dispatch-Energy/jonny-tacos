@@ -59,6 +59,42 @@ def get_card_builder():
     return _card_builder
 
 
+async def get_user_email(activity: Dict[str, Any]) -> str:
+    """
+    Extract user email from Teams activity.
+
+    The activity 'from' object often doesn't include email or userPrincipalName.
+    Falls back to the Teams Bot connector API to fetch the member profile which
+    contains the email address.
+    """
+    user_info = activity.get('from', {})
+
+    # Try direct fields first (sometimes present depending on tenant config)
+    email = user_info.get('email') or user_info.get('userPrincipalName', '')
+    if email:
+        logging.info(f"Got email from activity.from: {email}")
+        return email
+
+    # Fall back to Teams API to get full user profile with email
+    user_id = user_info.get('id', '')
+    if user_id:
+        try:
+            teams = get_teams_handler()
+            member_info = await teams.get_user_info(activity, user_id)
+            if member_info:
+                email = member_info.get('email') or member_info.get('userPrincipalName', '')
+                if email:
+                    logging.info(f"Got email from Teams API for user {user_id}: {email}")
+                    return email
+                else:
+                    logging.warning(f"Teams API returned member info but no email for user {user_id}")
+        except Exception as e:
+            logging.warning(f"Could not fetch user email from Teams API: {e}")
+
+    logging.warning(f"Could not resolve email for user (from.id={user_id})")
+    return ''
+
+
 # =============================================================================
 # Main Messages Endpoint
 # =============================================================================
@@ -102,6 +138,11 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         user_message = activity.get('text', '').strip()
         user_info = activity.get('from', {})
 
+        # Resolve user email from Teams API (from object often lacks email)
+        user_email = await get_user_email(activity)
+        if user_email:
+            user_info['email'] = user_email
+
         # Remove bot @mentions from message
         user_message = teams.remove_mentions(user_message)
 
@@ -117,7 +158,6 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
 
         # Check if this is a follow-up to an existing ticket using AI
         skip_ticket = False
-        user_email = user_info.get('email') or user_info.get('userPrincipalName', '')
 
         if user_email:
             try:
@@ -503,8 +543,8 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
         cards = get_card_builder()
         
         if action_type == 'create_ticket':
-            # User submitted ticket form
-            user_email = user_info.get('email') or user_info.get('userPrincipalName', '')
+            # User submitted ticket form - resolve email via Teams API
+            user_email = await get_user_email(activity)
             user_name = user_info.get('name', 'Unknown User')
             
             ticket_data = {

@@ -123,11 +123,16 @@ class QuickBaseManager:
             }
             
             # Add submitted_by email field (ID 19)
-            if ticket_data.get('user_email'):
+            user_email = ticket_data.get('user_email', '')
+            if user_email:
                 record_data["data"][0][self.field_mapping['submitted_by']] = {
-                    "value": ticket_data.get('user_email')
+                    "value": user_email
                 }
-            
+                print(f"   [DEBUG] Setting field 19 (submitted_by) = {user_email}")
+            else:
+                print(f"   [DEBUG] WARNING: No user_email in ticket_data, field 19 will be empty")
+                logging.warning("No user_email provided for ticket - field 19 (submitted_by) will be empty")
+
             print(f"   [DEBUG] Sending to QuickBase...")
             
             # Make the API call
