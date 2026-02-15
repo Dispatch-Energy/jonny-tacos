@@ -47,7 +47,7 @@ class AdaptiveCardBuilder:
                         },
                         {
                             "type": "TextBlock",
-                            "text": "I'm your AI-powered IT assistant. I can help with common technical issues, create support tickets, and provide quick solutions.",
+                            "text": "I'm your AI-powered IT assistant. I can help troubleshoot common technical issues and create support tickets for the IT team.",
                             "wrap": True,
                             "horizontalAlignment": "Center",
                             "spacing": "Medium"
@@ -61,7 +61,7 @@ class AdaptiveCardBuilder:
                     "items": [
                         {
                             "type": "TextBlock",
-                            "text": "**Here's what I can do:**",
+                            "text": "**What I can do:**",
                             "wrap": True,
                             "size": "Medium",
                             "weight": "Bolder"
@@ -112,6 +112,14 @@ class AdaptiveCardBuilder:
                                     ]
                                 }
                             ]
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": "**Note:** I create tickets for the IT team — I don't have access to create email addresses, accounts, or make system changes. An IT Admin handles those requests after reviewing your ticket.",
+                            "wrap": True,
+                            "isSubtle": True,
+                            "size": "Small",
+                            "spacing": "Medium"
                         }
                     ]
                 },
@@ -179,7 +187,7 @@ class AdaptiveCardBuilder:
                 },
                 {
                     "type": "TextBlock",
-                    "text": "Here's how to use the IT Support Bot:",
+                    "text": "I help troubleshoot IT issues and create tickets for the IT team. I don't have admin access to create emails, accounts, or make system changes — those are handled by IT Admins after ticket review.",
                     "wrap": True,
                     "spacing": "Medium"
                 },
@@ -617,7 +625,7 @@ class AdaptiveCardBuilder:
                 },
                 {
                     "type": "TextBlock",
-                    "text": "• IT has been notified of your request\n• You'll receive updates as we work on your ticket\n• Expected response time based on priority",
+                    "text": "• An IT Admin has been notified and will review your request\n• The IT Admin will perform any required actions (creating accounts, emails, granting access, etc.)\n• You'll receive updates as your ticket progresses\n• Expected response time is based on priority level",
                     "wrap": True,
                     "spacing": "Small"
                 }

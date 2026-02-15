@@ -4,10 +4,12 @@ Uses LangChain ITSupportChain for routing and response generation.
 
 Flow:
 1. Route via LangChain → Classify intent
-2. Search vector store + static KB → Get relevant context
-3. GPT ALWAYS generates response (with or without context)
-4. ALWAYS respond to user with solution
-5. Create ticket (AI checks if follow-up to existing ticket to avoid duplicates)
+2. Streaming topic detection → Check if follow-up to existing conversation
+   (conversation stream tracking + AI semantic analysis to prevent duplicate tickets)
+3. Search static KB → Get relevant context
+4. GPT ALWAYS generates response (with or without context)
+5. ALWAYS respond to user with solution (with clear IT Admin action disclaimers)
+6. Create ticket if new issue (skip for conversational follow-ups)
 """
 
 import azure.functions as func
@@ -156,8 +158,12 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         # Show typing indicator while processing
         await teams.send_typing_indicator(activity)
 
-        # Check if this is a follow-up to an existing ticket using AI
+        # Streaming topic detection: check if this is a follow-up to an existing
+        # ticket using conversation stream tracking + AI analysis.
+        # This prevents duplicate tickets from chatty back-and-forth conversations
+        # (e.g. "create a reporting@ email" → "did you create it?" → "any update?")
         skip_ticket = False
+        related_ticket = None
 
         if user_email:
             try:
@@ -168,21 +174,29 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
                 recent_tickets = await qb.get_user_tickets(user_email)
 
                 if recent_tickets:
-                    # Use AI to determine if this is a follow-up
-                    followup_result = chain.is_follow_up(user_message, recent_tickets)
+                    # Use streaming topic detection (conversation stream + AI)
+                    followup_result = chain.is_follow_up(
+                        user_message, recent_tickets, user_email=user_email
+                    )
                     skip_ticket = followup_result.get('is_follow_up', False)
+                    related_ticket = followup_result.get('related_ticket')
 
                     if skip_ticket:
-                        related = followup_result.get('related_ticket', 'existing ticket')
-                        logging.info(f"AI detected follow-up to {related}: {followup_result.get('reasoning')}")
+                        logging.info(
+                            f"Stream detection: follow-up to {related_ticket or 'existing ticket'} "
+                            f"- {followup_result.get('reasoning')}"
+                        )
                     else:
-                        logging.info(f"AI detected new issue: {followup_result.get('reasoning')}")
+                        logging.info(f"Stream detection: new issue - {followup_result.get('reasoning')}")
             except Exception as e:
                 logging.warning(f"Follow-up check failed, will create ticket: {e}")
                 skip_ticket = False
 
         # Process through LangChain support chain
-        return await handle_support_question(user_message, user_info, activity, skip_ticket=skip_ticket)
+        return await handle_support_question(
+            user_message, user_info, activity,
+            skip_ticket=skip_ticket, related_ticket=related_ticket
+        )
         
     except Exception as e:
         logging.error(f"Error handling message: {str(e)}")
@@ -203,7 +217,8 @@ async def handle_support_question(
     question: str,
     user_info: Dict,
     activity: Dict,
-    skip_ticket: bool = False
+    skip_ticket: bool = False,
+    related_ticket: str = None
 ) -> func.HttpResponse:
     """
     Process IT support question through LangChain.
@@ -213,12 +228,12 @@ async def handle_support_question(
     2. Send solution to user
     3. Create a ticket for tracking (unless skip_ticket=True for thread replies)
     """
-    
+
     teams = get_teams_handler()
     chain = get_support_chain()
     qb = get_qb_manager()
     cards = get_card_builder()
-    
+
     user_email = user_info.get('email') or user_info.get('userPrincipalName', '')
     user_name = user_info.get('name', 'Unknown User')
     
@@ -298,13 +313,18 @@ async def handle_support_question(
             category=category,
             confidence=confidence,
             offer_escalate=offer_escalate,
-            sources=sources
+            sources=sources,
+            needs_human=needs_human
         )
         await teams.send_card(activity, solution_card)
 
-        # Create ticket for tracking (skip for thread replies to avoid duplicates)
+        # Create ticket for tracking (skip for follow-ups to avoid duplicates)
+        ticket_number = None
         if skip_ticket:
-            logging.info("Skipping ticket creation - this is a reply in an existing thread")
+            ticket_number = related_ticket
+            logging.info(
+                f"Skipping ticket creation - follow-up to {related_ticket or 'existing conversation'}"
+            )
         else:
             ticket_data = {
                 'subject': generate_subject(question),
@@ -318,9 +338,14 @@ async def handle_support_question(
 
             ticket = await qb.create_ticket(ticket_data)
             if ticket:
-                logging.info(f"Ticket created: {ticket.get('ticket_number')} (status: {ticket_status}, priority: {ticket_priority})")
+                ticket_number = ticket.get('ticket_number')
+                logging.info(f"Ticket created: {ticket_number} (status: {ticket_status}, priority: {ticket_priority})")
             else:
                 logging.error("Failed to create tracking ticket")
+
+        # Record this message in the conversation stream for future follow-up detection
+        if user_email:
+            chain.conversation_stream.record_message(user_email, question, ticket_number)
 
         return func.HttpResponse(status_code=200)
 
@@ -375,17 +400,21 @@ def generate_subject(question: str) -> str:
 
 
 def create_solution_card(
-    solution: str, 
-    question: str, 
-    category: str, 
-    confidence: float = 0.8, 
+    solution: str,
+    question: str,
+    category: str,
+    confidence: float = 0.8,
     offer_escalate: bool = True,
-    sources: list = None
+    sources: list = None,
+    needs_human: bool = False
 ) -> Dict:
     """Create adaptive card for bot solution"""
-    
-    # Header based on confidence
-    if confidence >= 0.8:
+
+    # Header based on confidence and whether IT Admin action is needed
+    if needs_human:
+        header_text = "📋 Ticket Created for IT Admin"
+        header_color = "accent"
+    elif confidence >= 0.8:
         header_text = "💡 Here's what I found:"
         header_color = "good"
     elif confidence >= 0.6:
@@ -394,7 +423,7 @@ def create_solution_card(
     else:
         header_text = "💡 While IT reviews this, try:"
         header_color = "warning"
-    
+
     body = [
         {
             "type": "TextBlock",
@@ -410,9 +439,34 @@ def create_solution_card(
             "spacing": "Medium"
         }
     ]
-    
-    # Add confidence/status note
-    if confidence < 0.7:
+
+    # Add IT Admin action disclaimer when the request requires human intervention
+    if needs_human:
+        body.append({
+            "type": "Container",
+            "style": "emphasis",
+            "spacing": "Medium",
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": "⚠️ **This request requires an IT Administrator to action manually.**",
+                    "wrap": True,
+                    "weight": "Bolder",
+                    "size": "Small"
+                },
+                {
+                    "type": "TextBlock",
+                    "text": "A ticket has been created and assigned to the IT team. "
+                            "An IT Admin will review and perform the required action during business hours. "
+                            "This bot creates tickets — it does not have access to make system changes.",
+                    "wrap": True,
+                    "isSubtle": True,
+                    "size": "Small",
+                    "spacing": "Small"
+                }
+            ]
+        })
+    elif confidence < 0.7:
         body.append({
             "type": "TextBlock",
             "text": "📋 A ticket has been created. IT will follow up if needed.",
@@ -421,7 +475,7 @@ def create_solution_card(
             "spacing": "Medium",
             "size": "Small"
         })
-    
+
     # Add sources if available (subtle)
     if sources:
         body.append({
@@ -432,7 +486,7 @@ def create_solution_card(
             "spacing": "Small",
             "size": "Small"
         })
-    
+
     actions = [
         {
             "type": "Action.Submit",
@@ -445,7 +499,7 @@ def create_solution_card(
             }
         }
     ]
-    
+
     if offer_escalate:
         actions.append({
             "type": "Action.Submit",
@@ -456,7 +510,7 @@ def create_solution_card(
                 "category": category
             }
         })
-    
+
     return {
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "type": "AdaptiveCard",

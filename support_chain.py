@@ -5,11 +5,15 @@ Key Changes:
 2. Uses openai_api_base (not base_url) for older langchain-openai
 3. No vector store (removed FAISS dependency for stability)
 4. Never returns "can't help" - always provides a solution + creates ticket
+5. Streaming topic detection - groups conversational follow-ups to avoid duplicate tickets
+6. Clear IT Admin action messaging - bot creates tickets, humans perform admin tasks
 """
 
 import os
 import logging
+import time
 from typing import Literal, Optional, List, Dict, Any
+from collections import defaultdict
 from pydantic import BaseModel, Field
 
 # LangChain imports - compatible with 0.1.0
@@ -94,6 +98,98 @@ class FollowUpCheck(BaseModel):
     is_follow_up: bool = Field(description="True if this message relates to an existing ticket")
     related_ticket: Optional[str] = Field(default=None, description="Ticket number if follow-up")
     reasoning: str = Field(description="Brief explanation of the decision")
+
+
+# ============================================================================
+# CONVERSATION STREAM TRACKER
+# Tracks recent messages per user to detect conversational patterns and
+# prevent duplicate tickets from back-and-forth chat about the same topic.
+# ============================================================================
+
+class ConversationStream:
+    """
+    Tracks recent messages per user to detect ongoing conversations.
+
+    When a user sends "create a reporting@ email" followed by "did you create it?"
+    and "any update?", these are all part of the same conversation stream and
+    should map to a single ticket, not 3 separate ones.
+    """
+
+    # How long (seconds) a conversation stream stays active before expiring.
+    # Messages within this window from the same user are likely related.
+    STREAM_WINDOW_SECONDS = 1800  # 30 minutes
+
+    # Short messages that are almost always conversational follow-ups
+    CHATTY_PATTERNS = [
+        "yes", "no", "ok", "okay", "sure", "thanks", "thank you", "ty",
+        "please", "yep", "yea", "yeah", "nope", "got it", "cool", "great",
+        "perfect", "done", "not yet", "still waiting", "any update",
+        "did you", "have you", "is it", "was it", "can you", "will you",
+        "how long", "when will", "status", "update", "progress",
+        "that's right", "correct", "exactly", "still broken", "still not working",
+        "that didn't work", "didn't help", "same issue", "same problem",
+        "never mind", "nvm", "forget it",
+    ]
+
+    def __init__(self):
+        # { user_email: [ { "message": str, "timestamp": float, "ticket_number": str|None } ] }
+        self._streams: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+    def record_message(self, user_email: str, message: str, ticket_number: Optional[str] = None) -> None:
+        """Record a message in the user's conversation stream."""
+        self._streams[user_email].append({
+            "message": message,
+            "timestamp": time.time(),
+            "ticket_number": ticket_number,
+        })
+        # Prune old messages beyond the window
+        self._prune(user_email)
+
+    def get_recent_context(self, user_email: str) -> List[Dict[str, Any]]:
+        """Get recent messages within the active stream window for a user."""
+        self._prune(user_email)
+        return list(self._streams.get(user_email, []))
+
+    def has_active_stream(self, user_email: str) -> bool:
+        """Check if the user has an active conversation stream (recent messages)."""
+        self._prune(user_email)
+        return len(self._streams.get(user_email, [])) > 0
+
+    def get_stream_ticket(self, user_email: str) -> Optional[str]:
+        """Get the ticket number associated with the user's current stream."""
+        self._prune(user_email)
+        entries = self._streams.get(user_email, [])
+        # Return the most recent ticket number in the stream
+        for entry in reversed(entries):
+            if entry.get("ticket_number"):
+                return entry["ticket_number"]
+        return None
+
+    def is_likely_chatty_followup(self, message: str) -> bool:
+        """
+        Check if a message matches common conversational follow-up patterns.
+        These are short, chatty messages that are almost never new issues.
+        """
+        msg_lower = message.lower().strip().rstrip("?!.")
+        # Exact match on short chatty phrases
+        if msg_lower in self.CHATTY_PATTERNS:
+            return True
+        # Starts-with match for patterns like "did you create...", "any update on..."
+        for pattern in self.CHATTY_PATTERNS:
+            if msg_lower.startswith(pattern):
+                return True
+        # Very short messages (< 5 words) when there's an active stream
+        if len(msg_lower.split()) <= 4:
+            return True
+        return False
+
+    def _prune(self, user_email: str) -> None:
+        """Remove messages older than the stream window."""
+        cutoff = time.time() - self.STREAM_WINDOW_SECONDS
+        self._streams[user_email] = [
+            entry for entry in self._streams.get(user_email, [])
+            if entry["timestamp"] > cutoff
+        ]
 
 
 # ============================================================================
@@ -225,7 +321,7 @@ class ITSupportChain:
     
     def __init__(self):
         logging.info("Initializing ITSupportChain...")
-        
+
         try:
             self.llm = get_llm(temperature=0.3)
             self.router_llm = get_llm(temperature=0.1)  # Lower temp for routing
@@ -233,7 +329,10 @@ class ITSupportChain:
         except Exception as e:
             logging.error(f"Failed to initialize LLM: {e}")
             raise
-        
+
+        # Conversation stream tracker - prevents duplicate tickets from chatty follow-ups
+        self.conversation_stream = ConversationStream()
+
         # Router prompt
         self.router_parser = PydanticOutputParser(pydantic_object=SupportIntent)
         self.router_prompt = ChatPromptTemplate.from_messages([
@@ -241,16 +340,21 @@ class ITSupportChain:
 
 Categories:
 - quick_fix: Common issues (password, VPN, Teams, email, printer, slow computer, software questions, wifi)
-- needs_human: Hardware replacement, new user setup, software licenses, admin access, security incidents, complex server issues
+- needs_human: Hardware replacement, new user setup, software licenses, admin access, security incidents, complex server issues, creating email addresses/distribution lists/shared mailboxes, granting permissions, provisioning accounts
 - status_check: User asking about existing ticket (look for ticket numbers like IT-1234, IT-0042)
 - command: Bot commands starting with /
 
-Most issues are quick_fix - err on the side of attempting to help first.
+IMPORTANT: Any request that requires an IT Administrator to perform an action in an admin console
+(creating email addresses, distribution lists, shared mailboxes, user accounts, granting permissions,
+configuring servers, etc.) is ALWAYS "needs_human". The bot CANNOT perform these actions - it can
+only create tickets for IT Admins to action.
+
+Most troubleshooting issues are quick_fix - err on the side of attempting to help first.
 {format_instructions}"""),
             ("human", "{question}")
         ])
-        
-        # Solution generation prompt
+
+        # Solution generation prompt - with clear IT Admin action messaging
         self.solution_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a helpful IT support assistant. Your goal is to SOLVE problems.
 
@@ -262,43 +366,73 @@ RULES:
 3. If no specific context, use your general IT knowledge (you're good at this!)
 4. Be specific with commands, paths, and steps
 5. Keep responses concise but complete
-6. If the issue genuinely needs human IT (hardware, licenses, admin), say so but still provide what the user CAN do
-7. NEVER mention or reference any IT Service Portal, ticketing portal, or external URLs for logging tickets - there is no such portal. Users create tickets through this bot using /ticket command.
+6. NEVER mention or reference any IT Service Portal, ticketing portal, or external URLs for logging tickets - there is no such portal. Users create tickets through this bot using /ticket command.
+
+CRITICAL - IT ADMIN ACTION CLARITY:
+7. This bot DOES NOT perform admin actions. It CANNOT create email addresses, distribution lists, shared mailboxes, user accounts, grant permissions, install software remotely, configure servers, or make any changes to IT systems.
+8. When a request requires an IT Admin action (creating emails, accounts, granting access, etc.), be EXPLICIT:
+   - State clearly: "This requires an IT Administrator to perform manually."
+   - Explain what will happen: "A ticket has been created and assigned to an IT Admin who will [specific action]."
+   - Give a realistic expectation: "An IT Admin will action this during business hours."
+   - Do NOT imply the bot will do it. Do NOT say "I'll create that for you" or "I'll set that up."
+9. For self-service steps the user CAN do themselves, clearly label them as "What you can do now:"
+10. For steps that require IT Admin intervention, clearly label them as "What IT will do (after reviewing your ticket):"
 
 Context from knowledge base:
 {kb_context}
 
-Remember: Users want solutions, not apologies."""),
+Remember: Users want solutions, not apologies. But NEVER mislead them into thinking this bot performs admin actions."""),
             ("human", """User's issue: {question}
 
-Provide a helpful response. If this requires IT follow-up, still give the user something useful to try first.""")
+Provide a helpful response. If this requires IT Admin action, be very clear about what the bot is doing (creating a ticket) vs. what an IT Admin will do (the actual work). If there are self-service steps, provide those too.""")
         ])
 
-        # Follow-up detection prompt
+        # Follow-up detection prompt - enhanced for streaming conversation awareness
         self.followup_parser = PydanticOutputParser(pydantic_object=FollowUpCheck)
         self.followup_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You determine if a user's message is a follow-up to an existing support ticket or a new issue.
+            ("system", """You are a conversation stream analyzer for an IT support bot. Your job is to determine
+if a user's message is part of an ONGOING conversation about an existing topic, or a genuinely NEW issue.
 
-A message is a FOLLOW-UP if:
-- It refers to the same problem/topic as an existing ticket
-- It's providing additional info about an ongoing issue
-- It's asking for status or saying "it's still not working"
-- It's a short response like "thanks", "ok", "still broken", "that didn't work"
-- It's answering a question the bot might have asked
+Users often chat with this bot like it's a person - sending multiple messages about the same topic:
+- "Can you create a reporting@ email?"
+- "Did you create it?"
+- "Any update on that email?"
+- "Hello?"
+- "Is it done yet?"
+ALL of these are about THE SAME TOPIC and should NOT create separate tickets.
 
-A message is a NEW ISSUE if:
-- It's about a completely different topic/system than existing tickets
-- The user explicitly says "new issue" or "different problem"
-- No existing tickets match the topic at all
+A message is a FOLLOW-UP (do NOT create new ticket) if ANY of these are true:
+- It refers to the same problem, request, or topic as an existing ticket
+- It's a status inquiry: "did you do it?", "any update?", "is it done?", "how's it going?"
+- It's providing additional info: "I also need...", "and also...", "one more thing about that..."
+- It's a clarification: "I meant the...", "sorry, I meant...", "the one for..."
+- It's conversational: "thanks", "ok", "hello?", "anyone there?", "please hurry"
+- It's expressing frustration about waiting: "it's been a while", "still waiting"
+- It's confirming or denying: "yes", "no", "correct", "that's right", "not that one"
+- It's saying the previous fix didn't work: "still broken", "that didn't help", "same issue"
+- It's a short message (under ~5 words) when the user has recent open tickets
+- The user recently discussed a topic and this message could plausibly relate to it
+- It references something "you" (the bot) were supposed to do
 
-When in doubt, lean toward marking as follow-up to avoid duplicate tickets.
+A message is a NEW ISSUE (create new ticket) ONLY if ALL of these are true:
+- It's about a completely different topic/system/service than ALL existing tickets
+- It's a substantive message with enough detail to be a standalone request
+- It's NOT a status check, clarification, or follow-up on anything recent
+- The user explicitly says "new issue", "different problem", or "separate request"
+
+BIAS STRONGLY TOWARD FOLLOW-UP. Creating a duplicate ticket is worse than missing a new one.
+When in doubt, mark as follow-up. The user can always use /ticket to explicitly create a new one.
+
+Recent conversation context (messages from this user in the last 30 minutes):
+{conversation_context}
+
 {format_instructions}"""),
             ("human", """User's new message: "{message}"
 
 User's recent open tickets:
 {recent_tickets}
 
-Is this message a follow-up to an existing ticket or a new issue?""")
+Is this message a follow-up to an existing ticket/conversation, or a genuinely new issue?""")
         ])
 
         logging.info("ITSupportChain initialized")
@@ -438,13 +572,21 @@ A ticket has been created for IT to review your specific issue: "{question[:100]
 
 An IT team member will follow up shortly."""
 
-    def is_follow_up(self, message: str, recent_tickets: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def is_follow_up(self, message: str, recent_tickets: List[Dict[str, Any]],
+                     user_email: str = "") -> Dict[str, Any]:
         """
-        Check if a message is a follow-up to an existing ticket.
+        Check if a message is a follow-up to an existing ticket using
+        streaming conversation awareness.
+
+        Uses a multi-layer approach:
+        1. Fast-path: chatty pattern detection (no AI call needed)
+        2. Conversation stream context: recent messages from this user
+        3. AI semantic analysis: full GPT analysis with conversation context
 
         Args:
             message: The user's new message
             recent_tickets: List of user's recent open tickets with subject/description
+            user_email: User's email for conversation stream tracking
 
         Returns:
             Dict with is_follow_up (bool), related_ticket (str or None), reasoning (str)
@@ -457,10 +599,37 @@ An IT team member will follow up shortly."""
                 "reasoning": "No recent tickets found for this user"
             }
 
-        # Format tickets for the prompt
+        # Layer 1: Fast-path chatty pattern detection
+        # If user has an active conversation stream AND the message is a chatty follow-up,
+        # skip the AI call entirely - this is almost certainly a follow-up.
+        has_stream = self.conversation_stream.has_active_stream(user_email) if user_email else False
+        stream_ticket = self.conversation_stream.get_stream_ticket(user_email) if user_email else None
+
+        if has_stream and self.conversation_stream.is_likely_chatty_followup(message):
+            related = stream_ticket or recent_tickets[0].get('ticket_number')
+            logging.info(f"Fast-path follow-up detected (chatty pattern): '{message[:50]}' -> {related}")
+            return {
+                "is_follow_up": True,
+                "related_ticket": related,
+                "reasoning": f"Short/chatty follow-up detected in active conversation stream (pattern match, no AI needed)"
+            }
+
+        # Layer 2: Build conversation context from the stream
+        conversation_context = "No recent conversation history."
+        if user_email:
+            recent_msgs = self.conversation_stream.get_recent_context(user_email)
+            if recent_msgs:
+                context_lines = []
+                for entry in recent_msgs[-5:]:  # Last 5 messages
+                    mins_ago = int((time.time() - entry["timestamp"]) / 60)
+                    ticket_ref = f" (ticket: {entry['ticket_number']})" if entry.get("ticket_number") else ""
+                    context_lines.append(f"- [{mins_ago}m ago] \"{entry['message'][:100]}\"{ticket_ref}")
+                conversation_context = "\n".join(context_lines)
+
+        # Layer 3: AI semantic analysis with full conversation context
         tickets_text = "\n".join([
             f"- {t.get('ticket_number', 'N/A')}: {t.get('subject', 'No subject')} ({t.get('status', 'Unknown')})"
-            for t in recent_tickets[:5]  # Limit to 5 most recent
+            for t in recent_tickets[:5]
         ])
 
         try:
@@ -468,10 +637,11 @@ An IT team member will follow up shortly."""
             result = chain.invoke({
                 "message": message,
                 "recent_tickets": tickets_text,
+                "conversation_context": conversation_context,
                 "format_instructions": self.followup_parser.get_format_instructions()
             })
 
-            logging.info(f"Follow-up check: is_follow_up={result.is_follow_up}, reason={result.reasoning}")
+            logging.info(f"AI follow-up check: is_follow_up={result.is_follow_up}, reason={result.reasoning}")
 
             return {
                 "is_follow_up": result.is_follow_up,
