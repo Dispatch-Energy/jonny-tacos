@@ -284,7 +284,12 @@ If issues persist after these steps, hardware upgrade might be needed. Should I 
             Be concise but thorough. Include troubleshooting steps when appropriate.
             IMPORTANT: Users do not have admin access to their laptops and cannot install programs themselves.
             Do not suggest solutions that require admin rights or software installation.
-            If the issue requires administrative access, software installation, or hardware replacement, mention that IT assistance is needed."""
+            If the issue requires administrative access, software installation, or hardware replacement,
+            clearly state that a ticket will be created for an IT Administrator to perform the action manually.
+            CRITICAL: This bot DOES NOT create email addresses, user accounts, distribution lists, shared
+            mailboxes, grant permissions, or make any system changes. It only creates tickets. When a user
+            requests any admin action, be explicit: "A ticket has been created for an IT Admin to [action].
+            An IT Admin will review and complete this request." Never imply the bot will do it directly."""
             
             user_prompt = f"""User's IT Issue: {question}
 
