@@ -3,13 +3,12 @@ Azure Function - IT Support Bot for Teams
 Uses LangChain ITSupportChain for routing and response generation.
 
 Flow:
-1. Route via LangChain → Classify intent
-2. Streaming topic detection → Check if follow-up to existing conversation
-   (conversation stream tracking + AI semantic analysis to prevent duplicate tickets)
-3. Search static KB → Get relevant context
-4. GPT ALWAYS generates response (with or without context)
-5. ALWAYS respond to user with solution (with clear IT Admin action disclaimers)
-6. Create ticket if new issue (skip for conversational follow-ups)
+1. First message from user → Create ticket + start cooldown window (10 min)
+2. Messages during cooldown → Thread to existing ticket (no new tickets created)
+3. After cooldown expires → AI checks if message relates to older open tickets
+4. GPT ALWAYS generates a helpful response (with or without KB context)
+5. Responses clearly distinguish bot actions (ticket creation) vs IT Admin actions
+6. Follow-up messages are appended to existing ticket description for full thread
 """
 
 import azure.functions as func
@@ -158,39 +157,55 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         # Show typing indicator while processing
         await teams.send_typing_indicator(activity)
 
-        # Streaming topic detection: check if this is a follow-up to an existing
-        # ticket using conversation stream tracking + AI analysis.
-        # This prevents duplicate tickets from chatty back-and-forth conversations
-        # (e.g. "create a reporting@ email" → "did you create it?" → "any update?")
+        # ===================================================================
+        # STREAMING TICKET GATE: Hard cooldown + AI fallback
+        #
+        # Layer 1 (deterministic): If a ticket was created for this user in the
+        #   last N minutes, block new ticket creation. Thread to existing ticket.
+        #   No AI call needed — this catches the "did you create it?" / "any
+        #   update?" / "hello?" pattern that was generating 3-5 duplicate tickets.
+        #
+        # Layer 2 (AI, only after cooldown): If cooldown has expired but user
+        #   has older open tickets, use AI to check if the new message relates
+        #   to an existing ticket.
+        # ===================================================================
         skip_ticket = False
         related_ticket = None
 
         if user_email:
-            try:
-                qb = get_qb_manager()
-                chain = get_support_chain()
+            chain = get_support_chain()
 
-                # Get user's recent open tickets
-                recent_tickets = await qb.get_user_tickets(user_email)
+            # Layer 1: Hard cooldown gate
+            cooldown = chain.check_cooldown(user_email)
+            if cooldown["is_on_cooldown"]:
+                skip_ticket = True
+                related_ticket = cooldown["cooldown_ticket"]
+                remaining_min = cooldown["remaining_seconds"] // 60
+                logging.info(
+                    f"Cooldown gate: blocking ticket for {user_email}, "
+                    f"threading to {related_ticket} ({remaining_min}m remaining)"
+                )
+            else:
+                # Layer 2: AI follow-up check (only when cooldown has expired)
+                try:
+                    qb = get_qb_manager()
+                    recent_tickets = await qb.get_user_tickets(user_email)
 
-                if recent_tickets:
-                    # Use streaming topic detection (conversation stream + AI)
-                    followup_result = chain.is_follow_up(
-                        user_message, recent_tickets, user_email=user_email
-                    )
-                    skip_ticket = followup_result.get('is_follow_up', False)
-                    related_ticket = followup_result.get('related_ticket')
-
-                    if skip_ticket:
-                        logging.info(
-                            f"Stream detection: follow-up to {related_ticket or 'existing ticket'} "
-                            f"- {followup_result.get('reasoning')}"
+                    if recent_tickets:
+                        followup_result = chain.is_follow_up(
+                            user_message, recent_tickets, user_email=user_email
                         )
-                    else:
-                        logging.info(f"Stream detection: new issue - {followup_result.get('reasoning')}")
-            except Exception as e:
-                logging.warning(f"Follow-up check failed, will create ticket: {e}")
-                skip_ticket = False
+                        skip_ticket = followup_result.get('is_follow_up', False)
+                        related_ticket = followup_result.get('related_ticket')
+
+                        if skip_ticket:
+                            logging.info(
+                                f"AI follow-up: threading to {related_ticket} "
+                                f"- {followup_result.get('reasoning')}"
+                            )
+                except Exception as e:
+                    logging.warning(f"AI follow-up check failed, will create ticket: {e}")
+                    skip_ticket = False
 
         # Process through LangChain support chain
         return await handle_support_question(
@@ -318,14 +333,21 @@ async def handle_support_question(
         )
         await teams.send_card(activity, solution_card)
 
-        # Create ticket for tracking (skip for follow-ups to avoid duplicates)
+        # Create ticket or thread to existing one
         ticket_number = None
-        if skip_ticket:
+        if skip_ticket and related_ticket:
+            # Thread this message to the existing ticket instead of creating a new one
             ticket_number = related_ticket
-            logging.info(
-                f"Skipping ticket creation - follow-up to {related_ticket or 'existing conversation'}"
-            )
+            logging.info(f"Threading to existing ticket {related_ticket} (cooldown/follow-up)")
+            try:
+                await qb.append_to_ticket(related_ticket, question)
+            except Exception as e:
+                logging.warning(f"Failed to append follow-up to {related_ticket}: {e}")
+        elif skip_ticket:
+            # Follow-up detected but no related ticket found — just skip
+            logging.info("Skipping ticket creation (follow-up, no related ticket to thread to)")
         else:
+            # First message or cooldown expired — create a new ticket
             ticket_data = {
                 'subject': generate_subject(question),
                 'description': build_ticket_description(question, solution, sources, confidence),
@@ -343,7 +365,7 @@ async def handle_support_question(
             else:
                 logging.error("Failed to create tracking ticket")
 
-        # Record this message in the conversation stream for future follow-up detection
+        # Record this message in the conversation stream (tracks cooldown + context)
         if user_email:
             chain.conversation_stream.record_message(user_email, question, ticket_number)
 

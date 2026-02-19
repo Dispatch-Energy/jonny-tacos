@@ -102,34 +102,30 @@ class FollowUpCheck(BaseModel):
 
 # ============================================================================
 # CONVERSATION STREAM TRACKER
-# Tracks recent messages per user to detect conversational patterns and
-# prevent duplicate tickets from back-and-forth chat about the same topic.
+# Hard cooldown gate: first message creates a ticket, then all messages
+# within the cooldown window are threaded to that ticket (no new tickets).
+# This is deterministic — no AI judgment needed for the cooldown period.
 # ============================================================================
 
 class ConversationStream:
     """
-    Tracks recent messages per user to detect ongoing conversations.
+    Tracks conversations per user with a hard cooldown gate for ticket creation.
 
-    When a user sends "create a reporting@ email" followed by "did you create it?"
-    and "any update?", these are all part of the same conversation stream and
-    should map to a single ticket, not 3 separate ones.
+    Problem: Users chat with the bot like a person — "create a reporting@ email",
+    "did you create it?", "any update?" — and each message was creating a new ticket.
+
+    Solution: First message creates a ticket. For the next TICKET_COOLDOWN_SECONDS,
+    all subsequent messages from that user are blocked from creating new tickets and
+    are instead threaded to the existing one. After the cooldown expires, the AI
+    follow-up check is used as a secondary gate for older open tickets.
     """
 
-    # How long (seconds) a conversation stream stays active before expiring.
-    # Messages within this window from the same user are likely related.
-    STREAM_WINDOW_SECONDS = 1800  # 30 minutes
+    # Hard cooldown: no new tickets for this many seconds after the last ticket was created.
+    # User's proposal: 5-10 minutes. Using 10 minutes (600s) as default.
+    TICKET_COOLDOWN_SECONDS = int(os.getenv("TICKET_COOLDOWN_SECONDS", "600"))
 
-    # Short messages that are almost always conversational follow-ups
-    CHATTY_PATTERNS = [
-        "yes", "no", "ok", "okay", "sure", "thanks", "thank you", "ty",
-        "please", "yep", "yea", "yeah", "nope", "got it", "cool", "great",
-        "perfect", "done", "not yet", "still waiting", "any update",
-        "did you", "have you", "is it", "was it", "can you", "will you",
-        "how long", "when will", "status", "update", "progress",
-        "that's right", "correct", "exactly", "still broken", "still not working",
-        "that didn't work", "didn't help", "same issue", "same problem",
-        "never mind", "nvm", "forget it",
-    ]
+    # How long the full conversation stream stays active (for AI context if needed after cooldown).
+    STREAM_WINDOW_SECONDS = 1800  # 30 minutes
 
     def __init__(self):
         # { user_email: [ { "message": str, "timestamp": float, "ticket_number": str|None } ] }
@@ -142,46 +138,52 @@ class ConversationStream:
             "timestamp": time.time(),
             "ticket_number": ticket_number,
         })
-        # Prune old messages beyond the window
         self._prune(user_email)
 
-    def get_recent_context(self, user_email: str) -> List[Dict[str, Any]]:
-        """Get recent messages within the active stream window for a user."""
-        self._prune(user_email)
-        return list(self._streams.get(user_email, []))
+    def is_on_cooldown(self, user_email: str) -> bool:
+        """
+        Check if the user is within the ticket creation cooldown window.
+        Returns True if a ticket was created recently and new tickets should be blocked.
+        """
+        last_ticket_time = self._get_last_ticket_time(user_email)
+        if last_ticket_time is None:
+            return False
+        elapsed = time.time() - last_ticket_time
+        return elapsed < self.TICKET_COOLDOWN_SECONDS
 
-    def has_active_stream(self, user_email: str) -> bool:
-        """Check if the user has an active conversation stream (recent messages)."""
-        self._prune(user_email)
-        return len(self._streams.get(user_email, [])) > 0
-
-    def get_stream_ticket(self, user_email: str) -> Optional[str]:
-        """Get the ticket number associated with the user's current stream."""
+    def get_cooldown_ticket(self, user_email: str) -> Optional[str]:
+        """
+        Get the ticket number that's holding the cooldown for this user.
+        This is the ticket that follow-up messages should be threaded to.
+        """
         self._prune(user_email)
         entries = self._streams.get(user_email, [])
-        # Return the most recent ticket number in the stream
         for entry in reversed(entries):
             if entry.get("ticket_number"):
                 return entry["ticket_number"]
         return None
 
-    def is_likely_chatty_followup(self, message: str) -> bool:
-        """
-        Check if a message matches common conversational follow-up patterns.
-        These are short, chatty messages that are almost never new issues.
-        """
-        msg_lower = message.lower().strip().rstrip("?!.")
-        # Exact match on short chatty phrases
-        if msg_lower in self.CHATTY_PATTERNS:
-            return True
-        # Starts-with match for patterns like "did you create...", "any update on..."
-        for pattern in self.CHATTY_PATTERNS:
-            if msg_lower.startswith(pattern):
-                return True
-        # Very short messages (< 5 words) when there's an active stream
-        if len(msg_lower.split()) <= 4:
-            return True
-        return False
+    def get_cooldown_remaining(self, user_email: str) -> int:
+        """Get seconds remaining in the cooldown window (0 if not on cooldown)."""
+        last_ticket_time = self._get_last_ticket_time(user_email)
+        if last_ticket_time is None:
+            return 0
+        remaining = self.TICKET_COOLDOWN_SECONDS - (time.time() - last_ticket_time)
+        return max(0, int(remaining))
+
+    def get_recent_context(self, user_email: str) -> List[Dict[str, Any]]:
+        """Get recent messages within the stream window for a user."""
+        self._prune(user_email)
+        return list(self._streams.get(user_email, []))
+
+    def _get_last_ticket_time(self, user_email: str) -> Optional[float]:
+        """Get the timestamp of the most recent ticket created for this user."""
+        self._prune(user_email)
+        entries = self._streams.get(user_email, [])
+        for entry in reversed(entries):
+            if entry.get("ticket_number"):
+                return entry["timestamp"]
+        return None
 
     def _prune(self, user_email: str) -> None:
         """Remove messages older than the stream window."""
@@ -572,26 +574,53 @@ A ticket has been created for IT to review your specific issue: "{question[:100]
 
 An IT team member will follow up shortly."""
 
+    def check_cooldown(self, user_email: str) -> Dict[str, Any]:
+        """
+        Hard cooldown gate: if a ticket was created for this user within the
+        cooldown window, block new ticket creation and thread to the existing one.
+
+        This is deterministic — no AI call, no guessing.
+
+        Returns:
+            Dict with is_on_cooldown (bool), cooldown_ticket (str or None),
+            remaining_seconds (int)
+        """
+        if not user_email:
+            return {"is_on_cooldown": False, "cooldown_ticket": None, "remaining_seconds": 0}
+
+        on_cooldown = self.conversation_stream.is_on_cooldown(user_email)
+        cooldown_ticket = self.conversation_stream.get_cooldown_ticket(user_email) if on_cooldown else None
+        remaining = self.conversation_stream.get_cooldown_remaining(user_email)
+
+        if on_cooldown:
+            logging.info(
+                f"Cooldown active for {user_email}: ticket {cooldown_ticket}, "
+                f"{remaining}s remaining — blocking new ticket creation"
+            )
+
+        return {
+            "is_on_cooldown": on_cooldown,
+            "cooldown_ticket": cooldown_ticket,
+            "remaining_seconds": remaining,
+        }
+
     def is_follow_up(self, message: str, recent_tickets: List[Dict[str, Any]],
                      user_email: str = "") -> Dict[str, Any]:
         """
-        Check if a message is a follow-up to an existing ticket using
-        streaming conversation awareness.
+        AI-based follow-up detection — only used AFTER the cooldown window expires.
 
-        Uses a multi-layer approach:
-        1. Fast-path: chatty pattern detection (no AI call needed)
-        2. Conversation stream context: recent messages from this user
-        3. AI semantic analysis: full GPT analysis with conversation context
+        For messages within the cooldown window, use check_cooldown() instead (no AI needed).
+        This method is the secondary gate for when the cooldown has expired but there are
+        still older open tickets that might be related.
 
         Args:
             message: The user's new message
             recent_tickets: List of user's recent open tickets with subject/description
-            user_email: User's email for conversation stream tracking
+            user_email: User's email for conversation stream context
 
         Returns:
             Dict with is_follow_up (bool), related_ticket (str or None), reasoning (str)
         """
-        # If no recent tickets, it's definitely a new issue
         if not recent_tickets:
             return {
                 "is_follow_up": False,
@@ -599,34 +628,18 @@ An IT team member will follow up shortly."""
                 "reasoning": "No recent tickets found for this user"
             }
 
-        # Layer 1: Fast-path chatty pattern detection
-        # If user has an active conversation stream AND the message is a chatty follow-up,
-        # skip the AI call entirely - this is almost certainly a follow-up.
-        has_stream = self.conversation_stream.has_active_stream(user_email) if user_email else False
-        stream_ticket = self.conversation_stream.get_stream_ticket(user_email) if user_email else None
-
-        if has_stream and self.conversation_stream.is_likely_chatty_followup(message):
-            related = stream_ticket or recent_tickets[0].get('ticket_number')
-            logging.info(f"Fast-path follow-up detected (chatty pattern): '{message[:50]}' -> {related}")
-            return {
-                "is_follow_up": True,
-                "related_ticket": related,
-                "reasoning": f"Short/chatty follow-up detected in active conversation stream (pattern match, no AI needed)"
-            }
-
-        # Layer 2: Build conversation context from the stream
+        # Build conversation context from the stream for AI awareness
         conversation_context = "No recent conversation history."
         if user_email:
             recent_msgs = self.conversation_stream.get_recent_context(user_email)
             if recent_msgs:
                 context_lines = []
-                for entry in recent_msgs[-5:]:  # Last 5 messages
+                for entry in recent_msgs[-5:]:
                     mins_ago = int((time.time() - entry["timestamp"]) / 60)
                     ticket_ref = f" (ticket: {entry['ticket_number']})" if entry.get("ticket_number") else ""
                     context_lines.append(f"- [{mins_ago}m ago] \"{entry['message'][:100]}\"{ticket_ref}")
                 conversation_context = "\n".join(context_lines)
 
-        # Layer 3: AI semantic analysis with full conversation context
         tickets_text = "\n".join([
             f"- {t.get('ticket_number', 'N/A')}: {t.get('subject', 'No subject')} ({t.get('status', 'Unknown')})"
             for t in recent_tickets[:5]

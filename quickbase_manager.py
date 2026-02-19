@@ -301,6 +301,52 @@ class QuickBaseManager:
             logging.error(f"Error updating ticket: {str(e)}")
             return False
 
+    async def append_to_ticket(self, ticket_number: str, follow_up_message: str) -> bool:
+        """
+        Append a follow-up message to an existing ticket's description.
+        Used when a user sends additional messages during the cooldown window
+        so the conversation stays threaded to one ticket.
+        """
+        try:
+            ticket = await self.get_ticket(ticket_number)
+            if not ticket:
+                logging.warning(f"Cannot append to ticket {ticket_number}: not found")
+                return False
+
+            record_id = ticket.get('record_id')
+            existing_desc = ticket.get('description', '') or ''
+
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+            updated_desc = (
+                f"{existing_desc}\n\n"
+                f"---\n"
+                f"**Follow-up message** ({timestamp}):\n"
+                f"{follow_up_message}"
+            )
+
+            update_data = {
+                "to": self.table_id,
+                "data": [{
+                    "3": {"value": record_id},
+                    self.field_mapping['description']: {"value": updated_desc}
+                }]
+            }
+
+            response = await self.execute_request(
+                'POST',
+                f"{self.base_url}/records",
+                update_data
+            )
+
+            if response:
+                logging.info(f"Appended follow-up to ticket {ticket_number}")
+                return True
+            return False
+
+        except Exception as e:
+            logging.error(f"Error appending to ticket {ticket_number}: {str(e)}")
+            return False
+
     async def resolve_ticket(self, ticket_number: str, resolution: str, resolved_by: str) -> bool:
         """
         Resolve a ticket with resolution details
