@@ -16,8 +16,9 @@ import azure.functions as func
 import logging
 import json
 import os
+import re
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 
 app = func.FunctionApp()
 
@@ -97,6 +98,36 @@ async def get_user_email(activity: Dict[str, Any]) -> str:
     return ''
 
 
+def extract_on_behalf_of_email(message: str, sender_email: str) -> Tuple[Optional[str], str]:
+    """
+    Extract an email address from the message text to file a ticket on behalf of someone else.
+
+    If the message contains an email address that differs from the sender's,
+    it's treated as an "on behalf of" request. The email is stripped from the
+    message so the remaining text is processed as the issue description.
+
+    Returns:
+        (target_email, cleaned_message) - target_email is None if not on-behalf-of
+    """
+    # Find email addresses in the message
+    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    found_emails = re.findall(email_pattern, message)
+
+    if not found_emails:
+        return None, message
+
+    for email in found_emails:
+        if email.lower() != sender_email.lower():
+            # Found an email that isn't the sender's - this is an on-behalf-of request
+            cleaned = message.replace(email, '').strip()
+            # Clean up any extra whitespace left behind
+            cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+            logging.info(f"On-behalf-of detected: filing ticket for {email} (submitted by {sender_email})")
+            return email, cleaned
+
+    return None, message
+
+
 # =============================================================================
 # Main Messages Endpoint
 # =============================================================================
@@ -158,6 +189,11 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         # Show typing indicator while processing
         await teams.send_typing_indicator(activity)
 
+        # Check if filing on behalf of someone else (message contains another user's email)
+        on_behalf_of_email, cleaned_message = extract_on_behalf_of_email(user_message, user_email)
+        if on_behalf_of_email:
+            user_message = cleaned_message
+
         # Streaming topic detection: check if this is a follow-up to an existing
         # ticket using conversation stream tracking + AI analysis.
         # This prevents duplicate tickets from chatty back-and-forth conversations
@@ -195,7 +231,8 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         # Process through LangChain support chain
         return await handle_support_question(
             user_message, user_info, activity,
-            skip_ticket=skip_ticket, related_ticket=related_ticket
+            skip_ticket=skip_ticket, related_ticket=related_ticket,
+            on_behalf_of=on_behalf_of_email
         )
         
     except Exception as e:
@@ -218,7 +255,8 @@ async def handle_support_question(
     user_info: Dict,
     activity: Dict,
     skip_ticket: bool = False,
-    related_ticket: str = None
+    related_ticket: str = None,
+    on_behalf_of: str = None
 ) -> func.HttpResponse:
     """
     Process IT support question through LangChain.
@@ -227,6 +265,9 @@ async def handle_support_question(
     1. Generate a response (from vector store context or GPT directly)
     2. Send solution to user
     3. Create a ticket for tracking (unless skip_ticket=True for thread replies)
+
+    If on_behalf_of is set, the ticket's "Submitted By" field is set to
+    that email so the ticket shows up under the target user in QuickBase.
     """
 
     teams = get_teams_handler()
@@ -326,13 +367,21 @@ async def handle_support_question(
                 f"Skipping ticket creation - follow-up to {related_ticket or 'existing conversation'}"
             )
         else:
+            # When filing on behalf of someone else, the ticket's "Submitted By"
+            # is set to the target user so it appears under their name in QuickBase.
+            ticket_email = on_behalf_of if on_behalf_of else user_email
+            description = build_ticket_description(
+                question, solution, sources, confidence,
+                on_behalf_of=on_behalf_of, filed_by=user_email if on_behalf_of else None
+            )
+
             ticket_data = {
                 'subject': generate_subject(question),
-                'description': build_ticket_description(question, solution, sources, confidence),
+                'description': description,
                 'priority': ticket_priority,
                 'category': category,
                 'status': ticket_status,
-                'user_email': user_email,
+                'user_email': ticket_email,
                 'user_name': user_name
             }
 
@@ -364,13 +413,24 @@ Your issue has been logged and IT will follow up: "{question[:80]}..."
 In the meantime, try /help for common solutions or /ticket to submit detailed information."""
 
 
-def build_ticket_description(question: str, solution: str, sources: list, confidence: float) -> str:
+def build_ticket_description(
+    question: str, solution: str, sources: list, confidence: float,
+    on_behalf_of: str = None, filed_by: str = None
+) -> str:
     """Build comprehensive ticket description"""
     sources_str = ", ".join(sources) if sources else "GPT General Knowledge"
-    
+
+    behalf_section = ""
+    if on_behalf_of and filed_by:
+        behalf_section = f"""
+---
+**Filed on behalf of:** {on_behalf_of}
+**Filed by:** {filed_by}
+"""
+
     return f"""**User Question:**
 {question}
-
+{behalf_section}
 ---
 **Bot Response (Confidence: {confidence:.0%}):**
 {solution[:500]}{'...' if len(solution) > 500 else ''}
