@@ -343,7 +343,7 @@ async def handle_support_question(
             ticket_priority = priority
             offer_escalate = False  # Already getting IT attention
         else:
-            ticket_status = 'Bot Assisted'  # Logged but low priority
+            ticket_status = 'Awaiting IT'  # Logged but low priority
             ticket_priority = 'Low'
             offer_escalate = True  # User can escalate if needed
         
@@ -444,18 +444,16 @@ def build_ticket_description(
 
 def generate_subject(question: str) -> str:
     """Generate concise ticket subject from question"""
-    words_to_remove = ['the', 'a', 'an', 'is', 'are', 'was', 'were', 'been', 
-                       'have', 'has', 'had', 'i', 'my', 'me', "can't", "cannot", 
-                       "won't", "please", "help", "need"]
-    
-    words = question.lower().split()
-    filtered_words = [word for word in words if word not in words_to_remove]
-    
-    subject = ' '.join(filtered_words[:7]).title()
-    
+    # Clean up the question and use it directly as the subject
+    subject = question.strip().rstrip('?!.').strip()
+
+    # Capitalize the first letter
+    if subject:
+        subject = subject[0].upper() + subject[1:]
+
     if len(subject) > 50:
         subject = subject[:47] + '...'
-    
+
     return subject or "IT Support Request"
 
 
