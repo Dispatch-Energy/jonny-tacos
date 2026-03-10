@@ -122,6 +122,10 @@ def extract_on_behalf_of_email(message: str, sender_email: str) -> Tuple[Optiona
             cleaned = message.replace(email, '').strip()
             # Clean up any extra whitespace left behind
             cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+            # Strip leading "ticket" keyword and punctuation/quotes since the
+            # intent is already clear (filing on behalf of someone)
+            cleaned = re.sub(r'^ticket\s*[,:\-]?\s*', '', cleaned, flags=re.IGNORECASE).strip()
+            cleaned = cleaned.strip('"\'').strip()
             logging.info(f"On-behalf-of detected: filing ticket for {email} (submitted by {sender_email})")
             return email, cleaned
 
@@ -298,8 +302,8 @@ async def handle_support_question(
     # Handle different response types
     response_type = result.get('type')
     
-    if response_type == 'status_check':
-        # User asking about ticket status
+    if response_type == 'status_check' and not on_behalf_of:
+        # User asking about ticket status (skip when filing on behalf of someone)
         ticket_num = result.get('ticket_number')
         if ticket_num:
             ticket = await qb.get_ticket(ticket_num)
@@ -343,7 +347,7 @@ async def handle_support_question(
             ticket_priority = priority
             offer_escalate = False  # Already getting IT attention
         else:
-            ticket_status = 'Awaiting IT'  # Logged but low priority
+            ticket_status = 'Bot Assisted'  # Logged but low priority
             ticket_priority = 'Low'
             offer_escalate = True  # User can escalate if needed
         
