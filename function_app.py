@@ -122,6 +122,10 @@ def extract_on_behalf_of_email(message: str, sender_email: str) -> Tuple[Optiona
             cleaned = message.replace(email, '').strip()
             # Clean up any extra whitespace left behind
             cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+            # Strip leading "ticket" keyword and punctuation/quotes since the
+            # intent is already clear (filing on behalf of someone)
+            cleaned = re.sub(r'^ticket\s*[,:\-]?\s*', '', cleaned, flags=re.IGNORECASE).strip()
+            cleaned = cleaned.strip('"\'').strip()
             logging.info(f"On-behalf-of detected: filing ticket for {email} (submitted by {sender_email})")
             return email, cleaned
 
@@ -298,8 +302,8 @@ async def handle_support_question(
     # Handle different response types
     response_type = result.get('type')
     
-    if response_type == 'status_check':
-        # User asking about ticket status
+    if response_type == 'status_check' and not on_behalf_of:
+        # User asking about ticket status (skip when filing on behalf of someone)
         ticket_num = result.get('ticket_number')
         if ticket_num:
             ticket = await qb.get_ticket(ticket_num)
@@ -444,18 +448,16 @@ def build_ticket_description(
 
 def generate_subject(question: str) -> str:
     """Generate concise ticket subject from question"""
-    words_to_remove = ['the', 'a', 'an', 'is', 'are', 'was', 'were', 'been', 
-                       'have', 'has', 'had', 'i', 'my', 'me', "can't", "cannot", 
-                       "won't", "please", "help", "need"]
-    
-    words = question.lower().split()
-    filtered_words = [word for word in words if word not in words_to_remove]
-    
-    subject = ' '.join(filtered_words[:7]).title()
-    
+    # Clean up the question and use it directly as the subject
+    subject = question.strip().rstrip('?!.').strip()
+
+    # Capitalize the first letter
+    if subject:
+        subject = subject[0].upper() + subject[1:]
+
     if len(subject) > 50:
         subject = subject[:47] + '...'
-    
+
     return subject or "IT Support Request"
 
 

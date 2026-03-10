@@ -493,21 +493,15 @@ Format the response in a clear, friendly manner suitable for non-technical users
         """
         Generate concise ticket subject from question
         """
-        # Remove common words and limit length
-        words_to_remove = ['the', 'a', 'an', 'is', 'are', 'was', 'were', 'been', 'have', 'has', 'had', 'i', 'my', 'me']
-        
-        words = question.lower().split()
-        filtered_words = [word for word in words if word not in words_to_remove]
-        
-        # Take first 5-7 significant words
-        subject_words = filtered_words[:7]
-        subject = ' '.join(subject_words).title()
-        
-        # Limit to 50 characters
+        subject = question.strip().rstrip('?!.').strip()
+
+        if subject:
+            subject = subject[0].upper() + subject[1:]
+
         if len(subject) > 50:
             subject = subject[:47] + '...'
-        
-        return subject
+
+        return subject or "IT Support Request"
 
     def get_fallback_response(self, question: str) -> str:
         """
