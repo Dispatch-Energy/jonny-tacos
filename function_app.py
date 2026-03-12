@@ -1132,6 +1132,346 @@ def create_closed_ticket_card(ticket_data: Dict[str, Any]) -> Dict:
 
 
 # =============================================================================
+# QuickBase Webhook - Ticket Status Update Notification
+# =============================================================================
+
+@app.route(route="webhook/ticket-update", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+async def webhook_ticket_update(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Webhook endpoint for QuickBase to notify users when a ticket status changes.
+
+    QuickBase Webhook Configuration:
+    1. Go to your QuickBase app settings
+    2. Navigate to Webhooks
+    3. Create a new webhook with:
+       - URL: https://your-function-app.azurewebsites.net/api/webhook/ticket-update
+       - Method: POST
+       - Trigger: When record is modified
+       - Condition: Status field changes
+       - Include fields: ticket_number, subject, status, old_status, submitted_by (email),
+                         category, priority, resolution (optional)
+
+    Expected payload format:
+    {
+        "ticket_number": "IT-240101123456",
+        "subject": "Issue subject",
+        "status": "In Progress",
+        "old_status": "New",
+        "submitted_by": "user@company.com",
+        "category": "General Support",
+        "priority": "Medium",
+        "resolution": ""
+    }
+    """
+    logging.info("Received QuickBase webhook for ticket status update")
+
+    try:
+        # Validate webhook secret if configured
+        webhook_secret = os.environ.get('QB_WEBHOOK_SECRET', '')
+        if webhook_secret:
+            provided_secret = req.headers.get('X-QB-Webhook-Secret', '')
+            if provided_secret != webhook_secret:
+                logging.warning("Invalid webhook secret provided")
+                return func.HttpResponse(
+                    json.dumps({"error": "Unauthorized"}),
+                    status_code=401,
+                    mimetype="application/json"
+                )
+
+        body = req.get_json()
+        logging.info(f"Ticket update webhook payload: {json.dumps(body)}")
+
+        # Handle QuickBase webhook format (may wrap data differently)
+        ticket_data = body
+        if 'data' in body:
+            ticket_data = body.get('data', {})
+        if isinstance(ticket_data, list) and len(ticket_data) > 0:
+            ticket_data = ticket_data[0]
+
+        # Extract ticket information
+        ticket_number = ticket_data.get('ticket_number', '')
+        new_status = ticket_data.get('status', '')
+        old_status = ticket_data.get('old_status', '')
+        user_email = ticket_data.get('submitted_by', '')
+
+        if not ticket_number:
+            logging.warning("No ticket_number in webhook payload")
+            return func.HttpResponse(
+                json.dumps({"error": "Missing ticket_number"}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        if not new_status:
+            logging.warning(f"No status in webhook payload for ticket {ticket_number}")
+            return func.HttpResponse(
+                json.dumps({"error": "Missing status"}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        if not user_email:
+            logging.warning(f"No user email for ticket {ticket_number}, cannot send notification")
+            return func.HttpResponse(
+                json.dumps({"status": "skipped", "reason": "no user email"}),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+        # Skip if status hasn't actually changed
+        if old_status and old_status == new_status:
+            logging.info(f"Ticket {ticket_number} status unchanged ({new_status}). Skipping.")
+            return func.HttpResponse(
+                json.dumps({"status": "skipped", "reason": "status unchanged"}),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+        # Send notification to the user who submitted the ticket
+        notification_sent = await send_status_update_notification(ticket_data, user_email)
+
+        if notification_sent:
+            logging.info(f"Status update notification sent for {ticket_number} ({old_status} -> {new_status}) to {user_email}")
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "success",
+                    "ticket_number": ticket_number,
+                    "new_status": new_status,
+                    "old_status": old_status,
+                    "notified": user_email
+                }),
+                status_code=200,
+                mimetype="application/json"
+            )
+        else:
+            logging.warning(f"Failed to send status update notification for {ticket_number}")
+            return func.HttpResponse(
+                json.dumps({"status": "partial", "ticket_number": ticket_number, "notification_sent": False}),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+    except ValueError as e:
+        logging.error(f"Invalid JSON in webhook payload: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Invalid JSON payload"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logging.error(f"Error processing ticket update webhook: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
+async def send_status_update_notification(ticket_data: Dict[str, Any], user_email: str) -> bool:
+    """
+    Send a Teams notification to the user when their ticket status changes.
+
+    Uses proactive messaging to reach the user directly.
+    """
+    try:
+        teams = get_teams_handler()
+
+        # Create the status update notification card
+        notification_card = create_status_update_card(ticket_data)
+
+        # Send proactive message to user
+        success = await teams.send_notification_to_user(user_email, notification_card)
+
+        return success
+
+    except Exception as e:
+        logging.error(f"Error sending status update notification: {str(e)}")
+        return False
+
+
+def create_status_update_card(ticket_data: Dict[str, Any]) -> Dict:
+    """Create adaptive card for ticket status update notification"""
+    ticket_number = ticket_data.get('ticket_number', 'N/A')
+    subject = ticket_data.get('subject', 'No Subject')
+    new_status = ticket_data.get('status', 'Unknown')
+    old_status = ticket_data.get('old_status', '')
+    category = ticket_data.get('category', 'General Support')
+    priority = ticket_data.get('priority', 'Medium')
+    resolution = ticket_data.get('resolution', '')
+
+    priority_icons = {'Critical': '🔴', 'High': '🟠', 'Medium': '🟡', 'Low': '🟢'}
+    priority_icon = priority_icons.get(priority, '⚪')
+
+    # Status icons and colors for the timeline
+    status_config = {
+        'New': {'icon': '🆕', 'color': 'Default'},
+        'In Progress': {'icon': '🔧', 'color': 'Accent'},
+        'Awaiting User': {'icon': '⏳', 'color': 'Warning'},
+        'Awaiting IT': {'icon': '👨‍💻', 'color': 'Warning'},
+        'Resolved': {'icon': '✅', 'color': 'Good'},
+        'Closed': {'icon': '📁', 'color': 'Good'},
+        'Cancelled': {'icon': '❌', 'color': 'Attention'}
+    }
+
+    new_config = status_config.get(new_status, {'icon': '🔄', 'color': 'Default'})
+    status_icon = new_config['icon']
+    status_color = new_config['color']
+
+    # Build the transition text
+    if old_status:
+        old_icon = status_config.get(old_status, {'icon': '🔄'})['icon']
+        transition_text = f"{old_icon} {old_status}  →  {status_icon} **{new_status}**"
+    else:
+        transition_text = f"{status_icon} **{new_status}**"
+
+    # Build card body
+    card_body = [
+        {
+            "type": "Container",
+            "style": "emphasis",
+            "items": [
+                {
+                    "type": "ColumnSet",
+                    "columns": [
+                        {
+                            "type": "Column",
+                            "width": "auto",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": "🔔",
+                                    "size": "ExtraLarge"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "Column",
+                            "width": "stretch",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": "Ticket Status Update",
+                                    "weight": "Bolder",
+                                    "size": "Large",
+                                    "color": status_color
+                                },
+                                {
+                                    "type": "TextBlock",
+                                    "text": f"Ticket #{ticket_number} has been updated",
+                                    "size": "Medium",
+                                    "isSubtle": True,
+                                    "wrap": True
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "Container",
+            "separator": True,
+            "spacing": "Medium",
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": transition_text,
+                    "size": "Medium",
+                    "wrap": True,
+                    "horizontalAlignment": "Center",
+                    "spacing": "Small"
+                }
+            ]
+        },
+        {
+            "type": "Container",
+            "separator": True,
+            "spacing": "Medium",
+            "items": [
+                {
+                    "type": "FactSet",
+                    "facts": [
+                        {"title": "Ticket:", "value": f"#{ticket_number}"},
+                        {"title": "Subject:", "value": subject[:50] + ('...' if len(subject) > 50 else '')},
+                        {"title": "Category:", "value": category},
+                        {"title": "Priority:", "value": f"{priority_icon} {priority}"}
+                    ]
+                }
+            ]
+        }
+    ]
+
+    # Add resolution details if ticket is Resolved or Closed and resolution exists
+    if new_status in ('Resolved', 'Closed') and resolution:
+        card_body.append({
+            "type": "Container",
+            "separator": True,
+            "spacing": "Medium",
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": "**Resolution:**",
+                    "weight": "Bolder"
+                },
+                {
+                    "type": "TextBlock",
+                    "text": resolution[:500] + ('...' if len(resolution) > 500 else ''),
+                    "wrap": True,
+                    "spacing": "Small"
+                }
+            ]
+        })
+
+    # Add contextual message based on new status
+    status_messages = {
+        'In Progress': "Your ticket is now being worked on by the IT team.",
+        'Awaiting User': "The IT team needs more information from you. Please check your ticket and respond.",
+        'Awaiting IT': "Your response has been received. The IT team will follow up shortly.",
+        'Resolved': "Your ticket has been resolved. If the issue persists, please create a new ticket.",
+        'Closed': "Your ticket has been closed. If you need further help, please create a new ticket.",
+        'Cancelled': "Your ticket has been cancelled. If this was in error, please create a new ticket."
+    }
+
+    status_message = status_messages.get(new_status, '')
+    if status_message:
+        card_body.append({
+            "type": "TextBlock",
+            "text": status_message,
+            "wrap": True,
+            "isSubtle": True,
+            "spacing": "Large",
+            "size": "Small"
+        })
+
+    # Build actions
+    actions = [
+        {
+            "type": "Action.OpenUrl",
+            "title": "View in QuickBase",
+            "url": ticket_data.get('quickbase_url', '#')
+        }
+    ]
+
+    # Add "Create New Ticket" for terminal states
+    if new_status in ('Resolved', 'Closed', 'Cancelled'):
+        actions.insert(0, {
+            "type": "Action.Submit",
+            "title": "Create New Ticket",
+            "data": {
+                "action": "create_ticket_form"
+            }
+        })
+
+    return {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": card_body,
+        "actions": actions
+    }
+
+
+# =============================================================================
 # Health Check
 # =============================================================================
 
