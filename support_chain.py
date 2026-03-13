@@ -67,6 +67,7 @@ class SupportIntent(BaseModel):
     intent_type: Literal[
         "quick_fix",              # Can attempt solution immediately
         "needs_human",            # Definitely needs IT intervention
+        "automation_request",     # Can be automated with admin approval (M365 provisioning, etc.)
         "status_check",           # Checking existing ticket
         "command"                 # Bot command like /help
     ] = Field(description="Type of support interaction")
@@ -339,15 +340,21 @@ class ITSupportChain:
             ("system", """You classify IT support requests. Be decisive.
 
 Categories:
-- quick_fix: Common issues (password, VPN, Teams, email, printer, slow computer, software questions, wifi)
-- needs_human: Hardware replacement, new user setup, software licenses, admin access, security incidents, complex server issues, creating email addresses/distribution lists/shared mailboxes, granting permissions, provisioning accounts
+- quick_fix: Common issues (password, VPN, Teams, email troubleshooting, printer, slow computer, software questions, wifi)
+- automation_request: Requests to CREATE or SET UP M365 resources that can be provisioned automatically:
+  * Creating shared mailboxes, distribution lists, group email addresses
+  * Creating Microsoft Teams teams or channels
+  * Creating SharePoint sites or document libraries
+  * Setting up collaboration workspaces
+  * Any request containing phrases like "create a shared mailbox", "set up a team", "need an email address for", "create a SharePoint site", "need a workspace for"
+  NOTE: This is for CREATING new resources, not for troubleshooting existing ones.
+- needs_human: Hardware replacement, new user setup (non-M365), software licenses, admin access, security incidents, complex server issues, granting permissions to existing resources, provisioning non-M365 accounts, physical equipment requests
 - status_check: User asking about existing ticket (look for ticket numbers like IT-1234, IT-0042)
 - command: Bot commands starting with /
 
-IMPORTANT: Any request that requires an IT Administrator to perform an action in an admin console
-(creating email addresses, distribution lists, shared mailboxes, user accounts, granting permissions,
-configuring servers, etc.) is ALWAYS "needs_human". The bot CANNOT perform these actions - it can
-only create tickets for IT Admins to action.
+IMPORTANT: Requests to CREATE shared mailboxes, Teams, or SharePoint sites should be classified as
+"automation_request" (NOT "needs_human"). These can be automated with admin approval.
+Requests to TROUBLESHOOT existing email, Teams, or SharePoint issues are still "quick_fix".
 
 Most troubleshooting issues are quick_fix - err on the side of attempting to help first.
 {format_instructions}"""),
@@ -480,6 +487,19 @@ Is this message a follow-up to an existing ticket/conversation, or a genuinely n
                 "category": "General Support",
                 "priority": "Low",
                 "confidence": 1.0,
+                "needs_human": False,
+                "offer_ticket": False,
+                "sources": []
+            }
+
+        # Step 3b: Handle automation requests (M365 provisioning, etc.)
+        if intent.intent_type == "automation_request":
+            return {
+                "type": "automation_request",
+                "solution": "",
+                "category": intent.category or "M365 Provisioning",
+                "priority": intent.priority or "Medium",
+                "confidence": intent.confidence,
                 "needs_human": False,
                 "offer_ticket": False,
                 "sources": []
