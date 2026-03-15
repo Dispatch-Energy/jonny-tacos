@@ -23,6 +23,8 @@ class TeamsHandler:
         self.executor = ThreadPoolExecutor(max_workers=3)
         self._token = None
         self._token_expiry = None
+        self._graph_token = None
+        self._graph_token_expiry = None
 
     async def get_auth_token(self) -> str:
         """
@@ -65,6 +67,77 @@ class TeamsHandler:
         except Exception as e:
             logging.error(f"Error getting auth token: {str(e)}")
             return ""
+
+    async def get_graph_token(self) -> str:
+        """Get or refresh Microsoft Graph API token for user lookups."""
+        try:
+            if self._graph_token and self._graph_token_expiry and datetime.now() < self._graph_token_expiry:
+                return self._graph_token
+
+            token_url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+            data = {
+                'grant_type': 'client_credentials',
+                'client_id': self.app_id,
+                'client_secret': self.app_secret,
+                'scope': 'https://graph.microsoft.com/.default'
+            }
+
+            loop = asyncio.get_event_loop()
+
+            def get_token():
+                response = requests.post(token_url, data=data)
+                if response.status_code == 200:
+                    token_data = response.json()
+                    return token_data.get('access_token'), token_data.get('expires_in', 3600)
+                logging.error(f"Failed to get Graph token: {response.status_code} - {response.text}")
+                return None, None
+
+            token, expires_in = await loop.run_in_executor(self.executor, get_token)
+
+            if token:
+                self._graph_token = token
+                self._graph_token_expiry = datetime.now() + timedelta(seconds=expires_in - 60)
+                return token
+
+            logging.error("Failed to get Graph API token")
+            return ""
+
+        except Exception as e:
+            logging.error(f"Error getting Graph token: {str(e)}")
+            return ""
+
+    async def get_user_aad_id(self, user_email: str) -> Optional[str]:
+        """Resolve a user's email (UPN) to their Azure AD Object ID via Graph API."""
+        try:
+            graph_token = await self.get_graph_token()
+            if not graph_token:
+                return None
+
+            headers = {
+                'Authorization': f'Bearer {graph_token}',
+                'Content-Type': 'application/json'
+            }
+
+            # Use /users/{upn} endpoint to get user's AAD ID
+            graph_url = f"https://graph.microsoft.com/v1.0/users/{user_email}?$select=id"
+
+            loop = asyncio.get_event_loop()
+
+            def lookup_user():
+                response = requests.get(graph_url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    return response.json().get('id')
+                logging.error(f"Graph user lookup failed for {user_email}: {response.status_code} - {response.text}")
+                return None
+
+            aad_id = await loop.run_in_executor(self.executor, lookup_user)
+            if aad_id:
+                logging.info(f"Resolved {user_email} to AAD ID: {aad_id}")
+            return aad_id
+
+        except Exception as e:
+            logging.error(f"Error looking up AAD ID for {user_email}: {str(e)}")
+            return None
 
     async def send_message(self, activity: Dict[str, Any], message: str) -> bool:
         """
@@ -448,6 +521,14 @@ class TeamsHandler:
                 logging.error("Failed to get auth token for proactive message")
                 return False
 
+            # Resolve email to AAD Object ID for Bot Framework conversation creation
+            user_aad_id = await self.get_user_aad_id(user_email)
+            if not user_aad_id:
+                logging.error(f"Could not resolve AAD ID for {user_email}, cannot create conversation")
+                return False
+
+            member_id = f"29:{user_aad_id}"
+
             headers = {
                 'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json'
@@ -464,7 +545,7 @@ class TeamsHandler:
                 },
                 'members': [
                     {
-                        'id': user_email,  # User's email/UPN can be used as member ID
+                        'id': member_id,
                         'name': user_email
                     }
                 ],
@@ -555,6 +636,14 @@ class TeamsHandler:
             if not token:
                 return False
 
+            # Resolve email to AAD Object ID for Bot Framework conversation creation
+            user_aad_id = await self.get_user_aad_id(user_email)
+            if not user_aad_id:
+                logging.error(f"Could not resolve AAD ID for {user_email}")
+                return False
+
+            member_id = f"29:{user_aad_id}"
+
             headers = {
                 'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json'
@@ -569,7 +658,7 @@ class TeamsHandler:
                 },
                 'members': [
                     {
-                        'id': user_email,
+                        'id': member_id,
                         'name': user_email
                     }
                 ],

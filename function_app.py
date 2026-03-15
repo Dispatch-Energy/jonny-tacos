@@ -900,6 +900,47 @@ def create_ticket_list_card(tickets: list) -> Dict:
     }
 
 
+def parse_webhook_body(req: func.HttpRequest) -> Dict[str, Any]:
+    """Parse webhook request body, handling QuickBase's non-standard JSON format.
+
+    QuickBase field reference tokens (e.g. [Ticket Number]) get substituted with
+    raw values that may not be properly quoted, producing invalid JSON. This
+    function falls back to fixing unquoted values when standard JSON parsing fails.
+    """
+    # Try standard JSON first
+    try:
+        return req.get_json()
+    except ValueError:
+        pass
+
+    # Fall back to raw body - attempt to fix unquoted string values
+    raw = req.get_body().decode('utf-8').strip()
+    logging.info(f"Raw webhook body (JSON parse failed): {raw}")
+
+    if raw.startswith('{'):
+        # Quote unquoted string values: match "key": value where value isn't
+        # already quoted, a number, a boolean, null, or a nested structure
+        fixed = re.sub(
+            r'("[\w]+")\s*:\s*(?!"|-?\d|true|false|null|\[|\{)([^,}\n]+)',
+            lambda m: f'{m.group(1)}: "{m.group(2).strip()}"',
+            raw
+        )
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse fixed JSON: {e}\nFixed body: {fixed}")
+            raise ValueError(f"Cannot parse webhook body as JSON: {e}")
+
+    # Try form-encoded as last resort
+    from urllib.parse import parse_qs
+    if '=' in raw:
+        params = parse_qs(raw)
+        if params:
+            return {k: v[0] if len(v) == 1 else v for k, v in params.items()}
+
+    raise ValueError(f"Unrecognized webhook body format")
+
+
 # =============================================================================
 # Automation Flow - M365 Provisioning & Future Automations
 # =============================================================================
@@ -1218,7 +1259,7 @@ async def webhook_ticket_closed(req: func.HttpRequest) -> func.HttpResponse:
                     mimetype="application/json"
                 )
 
-        body = req.get_json()
+        body = parse_webhook_body(req)
         logging.info(f"Webhook payload: {json.dumps(body)}")
 
         # Handle QuickBase webhook format (may wrap data differently)
@@ -1277,7 +1318,8 @@ async def webhook_ticket_closed(req: func.HttpRequest) -> func.HttpResponse:
             )
 
     except ValueError as e:
-        logging.error(f"Invalid JSON in webhook payload: {str(e)}")
+        raw_body = req.get_body().decode('utf-8', errors='replace')[:500]
+        logging.error(f"Invalid JSON in webhook payload: {str(e)} | Raw body: {raw_body}")
         return func.HttpResponse(
             json.dumps({"error": "Invalid JSON payload"}),
             status_code=400,
@@ -1481,7 +1523,7 @@ async def webhook_ticket_update(req: func.HttpRequest) -> func.HttpResponse:
                     mimetype="application/json"
                 )
 
-        body = req.get_json()
+        body = parse_webhook_body(req)
         logging.info(f"Ticket update webhook payload: {json.dumps(body)}")
 
         # Handle QuickBase webhook format (may wrap data differently)
@@ -1555,7 +1597,8 @@ async def webhook_ticket_update(req: func.HttpRequest) -> func.HttpResponse:
             )
 
     except ValueError as e:
-        logging.error(f"Invalid JSON in webhook payload: {str(e)}")
+        raw_body = req.get_body().decode('utf-8', errors='replace')[:500]
+        logging.error(f"Invalid JSON in webhook payload: {str(e)} | Raw body: {raw_body}")
         return func.HttpResponse(
             json.dumps({"error": "Invalid JSON payload"}),
             status_code=400,
