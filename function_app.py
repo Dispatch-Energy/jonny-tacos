@@ -198,6 +198,14 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         user_message = teams.remove_mentions(user_message)
 
         if not user_message:
+            # Check if this is a card Action.Submit that Teams sent as a message
+            # (Teams sends Action.Submit with input fields as type "message",
+            # not "invoke", so card actions arrive here with empty text but
+            # action data in activity.value)
+            value_data = activity.get('value', {})
+            if isinstance(value_data, dict) and value_data.get('action'):
+                logging.info(f"Card action received as message type: {value_data.get('action')}")
+                return await handle_invoke(activity)
             return func.HttpResponse(status_code=200)
 
         # Handle slash commands directly (fast path)
