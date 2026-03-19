@@ -369,18 +369,6 @@ async def handle_support_question(
             ticket_priority = 'Low'
             offer_escalate = True  # User can escalate if needed
         
-        # ALWAYS send solution card to user
-        solution_card = create_solution_card(
-            solution=solution,
-            question=question,
-            category=category,
-            confidence=confidence,
-            offer_escalate=offer_escalate,
-            sources=sources,
-            needs_human=needs_human
-        )
-        await teams.send_card(activity, solution_card)
-
         # Create ticket for tracking (skip for follow-ups to avoid duplicates)
         ticket_number = None
         if skip_ticket:
@@ -413,6 +401,19 @@ async def handle_support_question(
                 logging.info(f"Ticket created: {ticket_number} (status: {ticket_status}, priority: {ticket_priority})")
             else:
                 logging.error("Failed to create tracking ticket")
+
+        # Send solution card to user (after ticket creation so we can include the ticket number)
+        solution_card = create_solution_card(
+            solution=solution,
+            question=question,
+            category=category,
+            confidence=confidence,
+            offer_escalate=offer_escalate,
+            sources=sources,
+            needs_human=needs_human,
+            ticket_number=ticket_number
+        )
+        await teams.send_card(activity, solution_card)
 
         # Record this message in the conversation stream for future follow-up detection
         if user_email:
@@ -486,7 +487,8 @@ def create_solution_card(
     confidence: float = 0.8,
     offer_escalate: bool = True,
     sources: list = None,
-    needs_human: bool = False
+    needs_human: bool = False,
+    ticket_number: str = None
 ) -> Dict:
     """Create adaptive card for bot solution"""
 
@@ -567,11 +569,44 @@ def create_solution_card(
             "size": "Small"
         })
 
+    # Add inline reply chat bar to encourage continued conversation
+    body.append({
+        "type": "Container",
+        "separator": True,
+        "spacing": "Medium",
+        "items": [
+            {
+                "type": "TextBlock",
+                "text": "💬 **Need more help? Continue the conversation here:**",
+                "wrap": True,
+                "size": "Small",
+                "weight": "Bolder"
+            },
+            {
+                "type": "Input.Text",
+                "id": "reply_message",
+                "placeholder": "Ask a follow-up question, describe what you tried, or tell me what's still not working...",
+                "isMultiline": True,
+                "maxLength": 500
+            }
+        ]
+    })
+
     actions = [
         {
             "type": "Action.Submit",
-            "title": "✅ This helped",
+            "title": "💬 Send Reply",
             "style": "positive",
+            "data": {
+                "action": "reply_to_solution",
+                "original_question": question[:200],
+                "category": category,
+                "ticket_number": ticket_number or ""
+            }
+        },
+        {
+            "type": "Action.Submit",
+            "title": "✅ This helped",
             "data": {
                 "action": "solution_feedback",
                 "helpful": True,
@@ -728,11 +763,76 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
             )
             await teams.update_card(activity, ticket_form)
         
+        elif action_type == 'reply_to_solution':
+            # User sent a follow-up reply from the inline chat bar on the solution card
+            reply_text = action_data.get('reply_message', '').strip()
+            original_question = action_data.get('original_question', '')
+            reply_category = action_data.get('category', 'General Support')
+            reply_ticket = action_data.get('ticket_number', '')
+
+            if not reply_text:
+                # Empty reply - nudge user to type something
+                await teams.send_message(
+                    activity,
+                    "Please type your follow-up question in the reply box and click **Send Reply**."
+                )
+            else:
+                # Resolve user email
+                user_email = await get_user_email(activity)
+                user_name = user_info.get('name', 'Unknown User')
+
+                # Show typing indicator while processing
+                await teams.send_typing_indicator(activity)
+
+                # Process the reply through the support chain as a follow-up
+                chain = get_support_chain()
+                try:
+                    result = chain.process(reply_text)
+                except Exception as e:
+                    logging.error(f"Chain error on reply: {e}")
+                    result = {
+                        "solution": get_fallback_response(reply_text),
+                        "category": reply_category,
+                        "priority": "Medium",
+                        "confidence": 0.3,
+                        "needs_human": True,
+                        "sources": []
+                    }
+
+                reply_solution = result.get('solution', get_fallback_response(reply_text))
+                reply_confidence = result.get('confidence', 0.5)
+                reply_sources = result.get('sources', [])
+                reply_needs_human = result.get('needs_human', False)
+
+                # Send a new solution card as a reply (keeping the conversation threaded)
+                follow_up_card = create_solution_card(
+                    solution=reply_solution,
+                    question=reply_text,
+                    category=reply_category,
+                    confidence=reply_confidence,
+                    offer_escalate=not reply_needs_human,
+                    sources=reply_sources,
+                    needs_human=reply_needs_human,
+                    ticket_number=reply_ticket
+                )
+                await teams.send_card(activity, follow_up_card)
+
+                # Record in conversation stream (no new ticket - this is a follow-up)
+                if user_email:
+                    chain.conversation_stream.record_message(
+                        user_email, reply_text, reply_ticket or None
+                    )
+
+                logging.info(
+                    f"Reply processed for ticket {reply_ticket or 'N/A'}: "
+                    f"'{reply_text[:50]}' (confidence: {reply_confidence:.0%})"
+                )
+
         elif action_type == 'solution_feedback':
             helpful = action_data.get('helpful', False)
             question = action_data.get('question', '')
             logging.info(f"Solution feedback: helpful={helpful}, question={question[:50]}")
-            
+
             thanks_card = {
                 "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                 "type": "AdaptiveCard",
@@ -746,6 +846,11 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
             }
             await teams.update_card(activity, thanks_card)
         
+        elif action_type == 'create_ticket_form':
+            # User clicked "Create New Ticket" from a notification card
+            ticket_form = cards.create_ticket_form()
+            await teams.send_card(activity, ticket_form)
+
         elif action_type == 'check_status':
             ticket_num = action_data.get('ticket_number')
             if ticket_num:
