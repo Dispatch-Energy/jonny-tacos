@@ -9,7 +9,7 @@ Flow:
 3. Search static KB → Get relevant context
 4. GPT ALWAYS generates response (with or without context)
 5. ALWAYS respond to user with solution (with clear IT Admin action disclaimers)
-6. Create ticket if new issue (skip for conversational follow-ups)
+6. Create a ticket only when IT action is needed or the user explicitly asks for one
 """
 
 import azure.functions as func
@@ -290,7 +290,8 @@ async def handle_support_question(
     ALWAYS:
     1. Generate a response (from vector store context or GPT directly)
     2. Send solution to user
-    3. Create a ticket for tracking (unless skip_ticket=True for thread replies)
+    3. Create a ticket only when the request needs IT follow-up, the user
+       explicitly asks for one, or the bot has low confidence
 
     If on_behalf_of is set, the ticket's "Submitted By" field is set to
     that email so the ticket shows up under the target user in QuickBase.
@@ -373,18 +374,28 @@ async def handle_support_question(
             ticket_priority = priority
             offer_escalate = False  # Already getting IT attention
         else:
-            ticket_status = 'Bot Assisted'  # Logged but low priority
+            ticket_status = 'New'  # Only used when user explicitly asks for a ticket
             ticket_priority = 'Low'
             offer_escalate = True  # User can escalate if needed
-        
-        # Create ticket for tracking (skip for follow-ups to avoid duplicates)
+
+        explicit_ticket_request = is_explicit_ticket_request(question)
+        should_create_ticket = should_auto_create_ticket(
+            question=question,
+            needs_human=needs_human,
+            confidence=confidence,
+            on_behalf_of=on_behalf_of
+        )
+
+        # Create ticket only when warranted (skip for follow-ups to avoid duplicates)
         ticket_number = None
+        ticket_state = "not_created"
         if skip_ticket:
             ticket_number = related_ticket
+            ticket_state = "existing" if related_ticket else "not_created"
             logging.info(
                 f"Skipping ticket creation - follow-up to {related_ticket or 'existing conversation'}"
             )
-        else:
+        elif should_create_ticket:
             # When filing on behalf of someone else, the ticket's "Submitted By"
             # is set to the target user so it appears under their name in QuickBase.
             ticket_email = on_behalf_of if on_behalf_of else user_email
@@ -406,9 +417,17 @@ async def handle_support_question(
             ticket = await qb.create_ticket(ticket_data)
             if ticket:
                 ticket_number = ticket.get('ticket_number')
+                ticket_state = "created"
                 logging.info(f"Ticket created: {ticket_number} (status: {ticket_status}, priority: {ticket_priority})")
             else:
                 logging.error("Failed to create tracking ticket")
+                ticket_state = "required_failed"
+                offer_escalate = True
+        else:
+            logging.info(
+                "No ticket created - continuing conversational support "
+                f"(confidence={confidence:.0%}, needs_human={needs_human}, explicit_ticket_request={explicit_ticket_request})"
+            )
 
         # Send solution card to user (after ticket creation so we can include the ticket number)
         solution_card = create_solution_card(
@@ -419,7 +438,8 @@ async def handle_support_question(
             offer_escalate=offer_escalate,
             sources=sources,
             needs_human=needs_human,
-            ticket_number=ticket_number
+            ticket_number=ticket_number,
+            ticket_state=ticket_state
         )
         await teams.send_card(activity, solution_card)
 
@@ -488,6 +508,39 @@ def generate_subject(question: str) -> str:
     return subject or "IT Support Request"
 
 
+def is_explicit_ticket_request(question: str) -> bool:
+    """Return True when the user clearly asks to open a ticket."""
+    patterns = [
+        r'\b(create|open|submit|file|log)\s+(a\s+)?ticket\b',
+        r'\bescalate\b',
+        r'\bneed\s+(it|human)\s+help\b'
+    ]
+    question_lower = question.lower()
+    return any(re.search(pattern, question_lower) for pattern in patterns)
+
+
+def should_auto_create_ticket(
+    question: str,
+    needs_human: bool,
+    confidence: float,
+    on_behalf_of: Optional[str] = None
+) -> bool:
+    """
+    Decide when the bot should open a QuickBase ticket automatically.
+
+    High-confidence self-service answers stay conversational by default.
+    Tickets are opened when a human needs to act, confidence is low, the
+    user explicitly requests escalation, or the message is filed on behalf
+    of another person.
+    """
+    return any([
+        needs_human,
+        confidence < 0.5,
+        bool(on_behalf_of),
+        is_explicit_ticket_request(question)
+    ])
+
+
 def create_solution_card(
     solution: str,
     question: str,
@@ -496,22 +549,23 @@ def create_solution_card(
     offer_escalate: bool = True,
     sources: list = None,
     needs_human: bool = False,
-    ticket_number: str = None
+    ticket_number: str = None,
+    ticket_state: str = "not_created"
 ) -> Dict:
     """Create adaptive card for bot solution"""
 
     # Header based on confidence and whether IT Admin action is needed
     if needs_human:
-        header_text = "📋 Ticket Created for IT Admin"
+        header_text = "📋 Here's the plan"
         header_color = "accent"
     elif confidence >= 0.8:
-        header_text = "💡 Here's what I found:"
+        header_text = "💡 Here's what I'd try next"
         header_color = "good"
     elif confidence >= 0.6:
-        header_text = "💡 This might help:"
+        header_text = "💡 Try this next"
         header_color = "accent"
     else:
-        header_text = "💡 While IT reviews this, try:"
+        header_text = "💡 A couple things to try"
         header_color = "warning"
 
     body = [
@@ -530,8 +584,7 @@ def create_solution_card(
         }
     ]
 
-    # Add IT Admin action disclaimer when the request requires human intervention
-    if needs_human:
+    if ticket_state == "created" and ticket_number:
         body.append({
             "type": "Container",
             "style": "emphasis",
@@ -539,16 +592,20 @@ def create_solution_card(
             "items": [
                 {
                     "type": "TextBlock",
-                    "text": "⚠️ **This request requires an IT Administrator to action manually.**",
+                    "text": f"🎫 **Ticket opened: {ticket_number}**",
                     "wrap": True,
                     "weight": "Bolder",
                     "size": "Small"
                 },
                 {
                     "type": "TextBlock",
-                    "text": "A ticket has been created and assigned to the IT team. "
-                            "An IT Admin will review and perform the required action during business hours. "
-                            "This bot creates tickets — it does not have access to make system changes.",
+                    "text": (
+                        "I opened this in QuickBase and will keep follow-up replies tied to the same request. "
+                        "This needs an IT Admin to make the change, and they will review it during business hours."
+                        if needs_human else
+                        "I logged this in QuickBase so there is a clear handoff if you still need IT involved. "
+                        "Reply below and I'll keep follow-ups tied to this ticket."
+                    ),
                     "wrap": True,
                     "isSubtle": True,
                     "size": "Small",
@@ -556,14 +613,74 @@ def create_solution_card(
                 }
             ]
         })
-    elif confidence < 0.7:
+    elif ticket_state == "existing" and ticket_number:
         body.append({
-            "type": "TextBlock",
-            "text": "📋 A ticket has been created. IT will follow up if needed.",
-            "wrap": True,
-            "isSubtle": True,
+            "type": "Container",
+            "style": "emphasis",
             "spacing": "Medium",
-            "size": "Small"
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": f"🧵 **Continuing ticket: {ticket_number}**",
+                    "wrap": True,
+                    "weight": "Bolder",
+                    "size": "Small"
+                },
+                {
+                    "type": "TextBlock",
+                    "text": "This looks like the same request, so I'm keeping the conversation on the existing ticket instead of opening a new one.",
+                    "wrap": True,
+                    "isSubtle": True,
+                    "size": "Small",
+                    "spacing": "Small"
+                }
+            ]
+        })
+    elif ticket_state == "required_failed":
+        body.append({
+            "type": "Container",
+            "style": "attention",
+            "spacing": "Medium",
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": "⚠️ **I couldn't open the ticket automatically**",
+                    "wrap": True,
+                    "weight": "Bolder",
+                    "size": "Small"
+                },
+                {
+                    "type": "TextBlock",
+                    "text": "This needs IT follow-up, but QuickBase ticket creation failed. Use **Still need help** or `/ticket` so the request does not get lost.",
+                    "wrap": True,
+                    "isSubtle": True,
+                    "size": "Small",
+                    "spacing": "Small"
+                }
+            ]
+        })
+    elif offer_escalate:
+        body.append({
+            "type": "Container",
+            "style": "emphasis",
+            "spacing": "Medium",
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": "💬 **No ticket yet**",
+                    "wrap": True,
+                    "weight": "Bolder",
+                    "size": "Small"
+                },
+                {
+                    "type": "TextBlock",
+                    "text": "I'm keeping this conversational for now. Reply below if you want to keep troubleshooting, or use **Still need help** if you want me to open a ticket.",
+                    "wrap": True,
+                    "isSubtle": True,
+                    "size": "Small",
+                    "spacing": "Small"
+                }
+            ]
         })
 
     # Add sources if available (subtle)
@@ -585,7 +702,7 @@ def create_solution_card(
         "items": [
             {
                 "type": "TextBlock",
-                "text": "💬 **Need more help? Continue the conversation here:**",
+                "text": "💬 **Reply here to keep this on the same thread:**",
                 "wrap": True,
                 "size": "Small",
                 "weight": "Bolder"
@@ -611,19 +728,30 @@ def create_solution_card(
                 "category": category,
                 "ticket_number": ticket_number or ""
             }
-        },
-        {
-            "type": "Action.Submit",
-            "title": "✅ This helped",
-            "data": {
-                "action": "solution_feedback",
-                "helpful": True,
-                "question": question[:200]
-            }
         }
     ]
 
-    if offer_escalate:
+    if ticket_number:
+        actions.append({
+            "type": "Action.Submit",
+            "title": "📋 Check Ticket",
+            "data": {
+                "action": "check_status",
+                "ticket_number": ticket_number
+            }
+        })
+
+    actions.append({
+        "type": "Action.Submit",
+        "title": "✅ This helped",
+        "data": {
+            "action": "solution_feedback",
+            "helpful": True,
+            "question": question[:200]
+        }
+    })
+
+    if offer_escalate and ticket_state not in ("created", "existing"):
         actions.append({
             "type": "Action.Submit",
             "title": "🎫 Still need help",
@@ -809,8 +937,44 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
 
                 reply_solution = result.get('solution', get_fallback_response(reply_text))
                 reply_confidence = result.get('confidence', 0.5)
+                reply_category = result.get('category', reply_category)
+                reply_priority = result.get('priority', 'Medium')
                 reply_sources = result.get('sources', [])
                 reply_needs_human = result.get('needs_human', False)
+                reply_ticket_state = "existing" if reply_ticket else "not_created"
+
+                if not reply_ticket and should_auto_create_ticket(
+                    question=reply_text,
+                    needs_human=reply_needs_human,
+                    confidence=reply_confidence
+                ):
+                    ticket_description = build_ticket_description(
+                        question=(
+                            f"Original request: {original_question}\n\n"
+                            f"Follow-up: {reply_text}"
+                            if original_question else reply_text
+                        ),
+                        solution=reply_solution,
+                        sources=reply_sources,
+                        confidence=reply_confidence
+                    )
+                    ticket_data = {
+                        'subject': generate_subject(original_question or reply_text),
+                        'description': ticket_description,
+                        'priority': reply_priority if reply_needs_human or reply_confidence < 0.5 else 'Low',
+                        'category': reply_category,
+                        'status': 'New',
+                        'user_email': user_email,
+                        'user_name': user_name
+                    }
+                    created_ticket = await qb.create_ticket(ticket_data)
+                    if created_ticket:
+                        reply_ticket = created_ticket.get('ticket_number', '')
+                        reply_ticket_state = "created"
+                        await notify_it_channel(created_ticket)
+                    else:
+                        reply_ticket_state = "required_failed"
+                offer_reply_escalate = (not reply_needs_human) or reply_ticket_state == "required_failed"
 
                 # Send a new solution card as a reply (keeping the conversation threaded)
                 follow_up_card = create_solution_card(
@@ -818,14 +982,15 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
                     question=reply_text,
                     category=reply_category,
                     confidence=reply_confidence,
-                    offer_escalate=not reply_needs_human,
+                    offer_escalate=offer_reply_escalate,
                     sources=reply_sources,
                     needs_human=reply_needs_human,
-                    ticket_number=reply_ticket
+                    ticket_number=reply_ticket,
+                    ticket_state=reply_ticket_state
                 )
                 await teams.send_card(activity, follow_up_card)
 
-                # Record in conversation stream (no new ticket - this is a follow-up)
+                # Record in conversation stream for follow-up detection
                 if user_email:
                     chain.conversation_stream.record_message(
                         user_email, reply_text, reply_ticket or None
@@ -1052,6 +1217,82 @@ def parse_webhook_body(req: func.HttpRequest) -> Dict[str, Any]:
             return {k: v[0] if len(v) == 1 else v for k, v in params.items()}
 
     raise ValueError(f"Unrecognized webhook body format")
+
+
+def extract_webhook_ticket_data(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Unwrap QuickBase webhook payloads into a single ticket dictionary."""
+    ticket_data = body
+    if isinstance(ticket_data, dict) and 'data' in ticket_data:
+        ticket_data = ticket_data.get('data', {})
+    if isinstance(ticket_data, list):
+        ticket_data = ticket_data[0] if ticket_data else {}
+    return ticket_data if isinstance(ticket_data, dict) else {}
+
+
+def normalize_webhook_key(key: str) -> str:
+    """Normalize payload keys so QuickBase labels and JSON keys map consistently."""
+    normalized = re.sub(r'[^a-z0-9]+', '_', str(key).strip().lower())
+    return re.sub(r'_+', '_', normalized).strip('_')
+
+
+def normalize_webhook_ticket_data(ticket_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize webhook payload field names into the keys the app expects."""
+    alias_map = {
+        'ticket_number': 'ticket_number',
+        'ticket_no': 'ticket_number',
+        'ticket_id': 'ticket_number',
+        'subject': 'subject',
+        'status': 'status',
+        'old_status': 'old_status',
+        'previous_status': 'old_status',
+        'prior_status': 'old_status',
+        'submitted_by': 'submitted_by',
+        'submitted_by_email': 'submitted_by',
+        'user_email': 'submitted_by',
+        'email': 'submitted_by',
+        'category': 'category',
+        'priority': 'priority',
+        'resolution': 'resolution',
+        'record_id': 'record_id',
+        'rid': 'record_id',
+        'quickbase_url': 'quickbase_url'
+    }
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, value in ticket_data.items():
+        key = normalize_webhook_key(raw_key)
+        target_key = alias_map.get(key, key)
+        normalized[target_key] = value
+
+    return normalized
+
+
+async def enrich_webhook_ticket_data(ticket_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Fill in missing QuickBase metadata so notification cards have working links
+    and complete ticket details even when the webhook body is minimal.
+    """
+    if ticket_data.get('quickbase_url'):
+        return ticket_data
+
+    ticket_number = ticket_data.get('ticket_number')
+    if not ticket_number:
+        return ticket_data
+
+    try:
+        qb = get_qb_manager()
+        existing_ticket = await qb.get_ticket(ticket_number)
+        if not existing_ticket:
+            return ticket_data
+
+        enriched = dict(existing_ticket)
+        for key, value in ticket_data.items():
+            if value not in (None, ''):
+                enriched[key] = value
+        return enriched
+    except Exception as e:
+        logging.warning(f"Failed to enrich webhook ticket data for {ticket_number}: {e}")
+        return ticket_data
 
 
 # =============================================================================
@@ -1375,12 +1616,7 @@ async def webhook_ticket_closed(req: func.HttpRequest) -> func.HttpResponse:
         body = parse_webhook_body(req)
         logging.info(f"Webhook payload: {json.dumps(body)}")
 
-        # Handle QuickBase webhook format (may wrap data differently)
-        ticket_data = body
-        if 'data' in body:
-            ticket_data = body.get('data', {})
-        if isinstance(ticket_data, list) and len(ticket_data) > 0:
-            ticket_data = ticket_data[0]
+        ticket_data = normalize_webhook_ticket_data(extract_webhook_ticket_data(body))
 
         # Extract ticket information
         ticket_number = ticket_data.get('ticket_number', '')
@@ -1456,6 +1692,8 @@ async def send_closed_ticket_notification(ticket_data: Dict[str, Any], user_emai
     try:
         teams = get_teams_handler()
         cards = get_card_builder()
+
+        ticket_data = await enrich_webhook_ticket_data(ticket_data)
 
         # Create the closed ticket notification card
         notification_card = create_closed_ticket_card(ticket_data)
@@ -1639,12 +1877,7 @@ async def webhook_ticket_update(req: func.HttpRequest) -> func.HttpResponse:
         body = parse_webhook_body(req)
         logging.info(f"Ticket update webhook payload: {json.dumps(body)}")
 
-        # Handle QuickBase webhook format (may wrap data differently)
-        ticket_data = body
-        if 'data' in body:
-            ticket_data = body.get('data', {})
-        if isinstance(ticket_data, list) and len(ticket_data) > 0:
-            ticket_data = ticket_data[0]
+        ticket_data = normalize_webhook_ticket_data(extract_webhook_ticket_data(body))
 
         # Extract ticket information
         ticket_number = ticket_data.get('ticket_number', '')
@@ -1726,6 +1959,12 @@ async def webhook_ticket_update(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
+@app.route(route="webhook/ticket-updated", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+async def webhook_ticket_updated_alias(req: func.HttpRequest) -> func.HttpResponse:
+    """Alias route for QuickBase configurations that use 'ticket-updated'."""
+    return await webhook_ticket_update(req)
+
+
 async def send_status_update_notification(ticket_data: Dict[str, Any], user_email: str) -> bool:
     """
     Send a Teams notification to the user when their ticket status changes.
@@ -1734,6 +1973,8 @@ async def send_status_update_notification(ticket_data: Dict[str, Any], user_emai
     """
     try:
         teams = get_teams_handler()
+
+        ticket_data = await enrich_webhook_ticket_data(ticket_data)
 
         # Create the status update notification card
         notification_card = create_status_update_card(ticket_data)
