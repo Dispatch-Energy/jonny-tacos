@@ -1,8 +1,11 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from function_app import (
     create_solution_card,
     extract_webhook_ticket_data,
+    get_follow_up_candidate_tickets,
+    is_explicit_ticket_request,
     normalize_webhook_ticket_data,
     should_auto_create_ticket,
 )
@@ -35,6 +38,31 @@ class FunctionAppTests(unittest.TestCase):
                 confidence=0.85,
             )
         )
+
+    def test_i_do_want_ticket_counts_as_explicit_ticket_request(self):
+        self.assertTrue(is_explicit_ticket_request("I do want a ticket for this"))
+        self.assertTrue(is_explicit_ticket_request("I want ticket"))
+
+    def test_follow_up_candidates_ignore_old_or_closed_tickets(self):
+        recent_ticket = {
+            "ticket_number": "IT-1001",
+            "status": "In Progress",
+            "submitted_date": (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)).isoformat(),
+        }
+        old_ticket = {
+            "ticket_number": "IT-1002",
+            "status": "In Progress",
+            "submitted_date": (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)).isoformat(),
+        }
+        closed_ticket = {
+            "ticket_number": "IT-1003",
+            "status": "Closed",
+            "submitted_date": (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)).isoformat(),
+        }
+
+        candidates = get_follow_up_candidate_tickets([recent_ticket, old_ticket, closed_ticket])
+
+        self.assertEqual([ticket["ticket_number"] for ticket in candidates], ["IT-1001"])
 
     def test_solution_card_shows_ticket_context_when_ticket_created(self):
         card = create_solution_card(

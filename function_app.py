@@ -17,7 +17,7 @@ import logging
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, Tuple
 
 app = func.FunctionApp()
@@ -146,6 +146,50 @@ def extract_on_behalf_of_email(message: str, sender_email: str) -> Tuple[Optiona
     return None, message
 
 
+def parse_ticket_datetime(value: str) -> Optional[datetime]:
+    """Parse QuickBase ticket datetime/date strings into naive UTC datetimes."""
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(value, '%Y-%m-%d')
+        except ValueError:
+            return None
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def get_follow_up_candidate_tickets(tickets: list) -> list:
+    """
+    Reduce dedupe candidates to recent, still-active tickets.
+
+    This avoids matching brand new requests against stale tickets from the
+    same user that happen to be vaguely similar.
+    """
+    lookback_days = int(os.environ.get('FOLLOW_UP_TICKET_LOOKBACK_DAYS', '7'))
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=lookback_days)
+    active_statuses = {'New', 'In Progress', 'Awaiting User', 'Awaiting IT'}
+
+    candidates = []
+    for ticket in tickets:
+        status = (ticket.get('status') or '').strip()
+        if status and status not in active_statuses:
+            continue
+
+        submitted_at = parse_ticket_datetime(ticket.get('submitted_date', ''))
+        if submitted_at and submitted_at < cutoff:
+            continue
+
+        candidates.append(ticket)
+
+    return candidates
+
+
 # =============================================================================
 # Main Messages Endpoint
 # =============================================================================
@@ -193,6 +237,7 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         user_email = await get_user_email(activity)
         if user_email:
             user_info['email'] = user_email
+            await teams.store_conversation_reference(activity, user_email)
 
         # Remove bot @mentions from message
         user_message = teams.remove_mentions(user_message)
@@ -220,6 +265,8 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         if on_behalf_of_email:
             user_message = cleaned_message
 
+        explicit_ticket_request = is_explicit_ticket_request(user_message)
+
         # Streaming topic detection: check if this is a follow-up to an existing
         # ticket using conversation stream tracking + AI analysis.
         # This prevents duplicate tickets from chatty back-and-forth conversations
@@ -227,18 +274,21 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
         skip_ticket = False
         related_ticket = None
 
-        if user_email:
+        if explicit_ticket_request:
+            logging.info("Skipping follow-up dedupe because the user explicitly asked for a ticket")
+        elif user_email:
             try:
                 qb = get_qb_manager()
                 chain = get_support_chain()
 
-                # Get user's recent open tickets
+                # Get user's recent active tickets and narrow to fresh dedupe candidates
                 recent_tickets = await qb.get_user_tickets(user_email)
+                dedupe_candidates = get_follow_up_candidate_tickets(recent_tickets)
 
-                if recent_tickets:
+                if dedupe_candidates:
                     # Use streaming topic detection (conversation stream + AI)
                     followup_result = chain.is_follow_up(
-                        user_message, recent_tickets, user_email=user_email
+                        user_message, dedupe_candidates, user_email=user_email
                     )
                     skip_ticket = followup_result.get('is_follow_up', False)
                     related_ticket = followup_result.get('related_ticket')
@@ -250,6 +300,8 @@ async def handle_message(activity: Dict[str, Any]) -> func.HttpResponse:
                         )
                     else:
                         logging.info(f"Stream detection: new issue - {followup_result.get('reasoning')}")
+                else:
+                    logging.info("No recent active tickets eligible for dedupe matching")
             except Exception as e:
                 logging.warning(f"Follow-up check failed, will create ticket: {e}")
                 skip_ticket = False
@@ -512,6 +564,8 @@ def is_explicit_ticket_request(question: str) -> bool:
     """Return True when the user clearly asks to open a ticket."""
     patterns = [
         r'\b(create|open|submit|file|log)\s+(a\s+)?ticket\b',
+        r'\b(want|need)\s+(a\s+)?ticket\b',
+        r'\bwant\s+me\s+to\s+(create|open|file|log)\s+(a\s+)?ticket\b',
         r'\bescalate\b',
         r'\bneed\s+(it|human)\s+help\b'
     ]
@@ -846,6 +900,10 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
         teams = get_teams_handler()
         qb = get_qb_manager()
         cards = get_card_builder()
+        invoke_user_email = await get_user_email(activity)
+        if invoke_user_email:
+            user_info['email'] = invoke_user_email
+            await teams.store_conversation_reference(activity, invoke_user_email)
 
         # Handle provisioning/automation actions first
         if action_type and action_type.startswith('provisioning_'):

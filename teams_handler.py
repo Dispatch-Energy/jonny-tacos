@@ -7,10 +7,16 @@ import json
 import logging
 import requests
 import asyncio
+import re
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import uuid
+
+try:
+    from azure.storage.blob import BlobServiceClient
+except ImportError:
+    BlobServiceClient = None
 
 class TeamsHandler:
     def __init__(self):
@@ -25,6 +31,17 @@ class TeamsHandler:
         self._token_expiry = None
         self._graph_token = None
         self._graph_token_expiry = None
+        self.storage_connection_string = (
+            os.environ.get('TEAMS_STORAGE_CONNECTION_STRING', '')
+            or os.environ.get('AzureWebJobsStorage', '')
+            or os.environ.get('AZURE_STORAGE_CONNECTION_STRING', '')
+        )
+        self.conversation_container = os.environ.get(
+            'TEAMS_CONVERSATION_CONTAINER',
+            'teams-conversation-references'
+        )
+        self._blob_service_client = None
+        self._conversation_container_ready = False
 
     async def get_auth_token(self) -> str:
         """
@@ -443,6 +460,229 @@ class TeamsHandler:
             'serviceUrl': activity.get('serviceUrl', self.service_url)
         }
 
+    def is_personal_conversation(self, activity: Dict[str, Any]) -> bool:
+        """Return True when the activity is from a 1:1 chat with the bot."""
+        conversation = activity.get('conversation', {})
+        conversation_type = (conversation.get('conversationType') or '').lower()
+        return conversation_type == 'personal'
+
+    def _conversation_blob_name(self, user_email: str) -> str:
+        safe_email = re.sub(r'[^a-z0-9._-]+', '_', user_email.lower())
+        return f"{safe_email}.json"
+
+    async def _get_conversation_container_client(self):
+        """Get a blob container client for persisted conversation references."""
+        if not BlobServiceClient or not self.storage_connection_string:
+            return None
+
+        if self._blob_service_client is None:
+            try:
+                self._blob_service_client = BlobServiceClient.from_connection_string(
+                    self.storage_connection_string
+                )
+            except Exception as e:
+                logging.error(f"Failed to initialize blob storage client: {str(e)}")
+                return None
+
+        container_client = self._blob_service_client.get_container_client(
+            self.conversation_container
+        )
+
+        if not self._conversation_container_ready:
+            loop = asyncio.get_event_loop()
+
+            def ensure_container():
+                try:
+                    container_client.create_container()
+                except Exception:
+                    pass
+                return True
+
+            await loop.run_in_executor(self.executor, ensure_container)
+            self._conversation_container_ready = True
+
+        return container_client
+
+    async def store_conversation_reference(self, activity: Dict[str, Any], user_email: str) -> bool:
+        """
+        Persist a personal-chat conversation reference so webhook notifications can
+        reliably message the user later without creating a new Teams chat.
+        """
+        if not user_email or not self.is_personal_conversation(activity):
+            return False
+
+        container_client = await self._get_conversation_container_client()
+        if not container_client:
+            return False
+
+        reference = self.create_conversation_reference(activity)
+        reference['user_email'] = user_email
+        reference['stored_at'] = datetime.utcnow().isoformat() + 'Z'
+        blob_name = self._conversation_blob_name(user_email)
+
+        loop = asyncio.get_event_loop()
+
+        def upload():
+            try:
+                blob_client = container_client.get_blob_client(blob_name)
+                blob_client.upload_blob(json.dumps(reference), overwrite=True)
+                return True
+            except Exception as e:
+                logging.error(f"Failed to store conversation reference for {user_email}: {str(e)}")
+                return False
+
+        success = await loop.run_in_executor(self.executor, upload)
+        if success:
+            logging.info(f"Stored personal conversation reference for {user_email}")
+        return success
+
+    async def get_conversation_reference(self, user_email: str) -> Optional[Dict[str, Any]]:
+        """Load a persisted conversation reference for a user if available."""
+        if not user_email:
+            return None
+
+        container_client = await self._get_conversation_container_client()
+        if not container_client:
+            return None
+
+        blob_name = self._conversation_blob_name(user_email)
+        loop = asyncio.get_event_loop()
+
+        def download():
+            try:
+                blob_client = container_client.get_blob_client(blob_name)
+                raw = blob_client.download_blob().readall()
+                return json.loads(raw)
+            except Exception:
+                return None
+
+        reference = await loop.run_in_executor(self.executor, download)
+        if reference:
+            logging.info(f"Loaded stored conversation reference for {user_email}")
+        return reference
+
+    async def send_proactive_card(self, conversation_reference: Dict[str, Any], card: Dict[str, Any]) -> bool:
+        """Send an adaptive card using a stored conversation reference."""
+        try:
+            token = await self.get_auth_token()
+            if not token:
+                return False
+
+            service_url = conversation_reference.get('serviceUrl', self.service_url)
+            conversation_id = conversation_reference.get('conversation', {}).get('id')
+            if not conversation_id:
+                logging.error("Conversation reference missing conversation id")
+                return False
+
+            message_url = f"{service_url}v3/conversations/{conversation_id}/activities"
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json'
+            }
+            message_activity = {
+                'type': 'message',
+                'from': conversation_reference.get('bot', {'id': self.app_id, 'name': 'IT Support Bot'}),
+                'conversation': conversation_reference.get('conversation'),
+                'recipient': conversation_reference.get('user'),
+                'attachments': [{
+                    'contentType': 'application/vnd.microsoft.card.adaptive',
+                    'content': card
+                }]
+            }
+
+            loop = asyncio.get_event_loop()
+
+            def send():
+                response = requests.post(
+                    message_url,
+                    headers=headers,
+                    json=message_activity,
+                    timeout=30
+                )
+                if response.status_code not in [200, 201, 202]:
+                    logging.error(
+                        f"Failed proactive send to stored conversation {conversation_id}: "
+                        f"{response.status_code} - {response.text}"
+                    )
+                return response.status_code in [200, 201, 202]
+
+            return await loop.run_in_executor(self.executor, send)
+
+        except Exception as e:
+            logging.error(f"Error sending proactive card: {str(e)}")
+            return False
+
+    async def _create_personal_conversation(self, token: str, user_email: str, user_aad_id: str) -> Optional[Dict[str, Any]]:
+        """Create a 1:1 Teams conversation with the user using Bot Framework APIs."""
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json'
+        }
+        create_conv_url = f"{self.service_url}v3/conversations"
+
+        payloads = [
+            {
+                'bot': {
+                    'id': self.app_id,
+                    'name': 'IT Support Bot'
+                },
+                'members': [
+                    {
+                        'aadObjectId': user_aad_id,
+                        'name': user_email
+                    }
+                ],
+                'channelData': {
+                    'tenant': {
+                        'id': self.tenant_id
+                    }
+                },
+                'tenantId': self.tenant_id,
+                'isGroup': False
+            },
+            {
+                'bot': {
+                    'id': self.app_id,
+                    'name': 'IT Support Bot'
+                },
+                'members': [
+                    {
+                        'id': f'29:{user_aad_id}',
+                        'name': user_email
+                    }
+                ],
+                'channelData': {
+                    'tenant': {
+                        'id': self.tenant_id
+                    }
+                },
+                'tenantId': self.tenant_id,
+                'isGroup': False
+            }
+        ]
+
+        loop = asyncio.get_event_loop()
+
+        def create(payload):
+            response = requests.post(
+                create_conv_url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            return response
+
+        for payload in payloads:
+            response = await loop.run_in_executor(self.executor, create, payload)
+            if response.status_code in [200, 201, 202]:
+                return response.json()
+            logging.error(
+                f"Failed to create conversation for {user_email}: "
+                f"{response.status_code} - {response.text}"
+            )
+
+        return None
+
     async def send_proactive_message(self, conversation_reference: Dict[str, Any], message: str) -> bool:
         """
         Send a proactive message using a stored conversation reference
@@ -521,58 +761,28 @@ class TeamsHandler:
                 logging.error("Failed to get auth token for proactive message")
                 return False
 
+            stored_reference = await self.get_conversation_reference(user_email)
+            if stored_reference:
+                sent = await self.send_proactive_card(stored_reference, card)
+                if sent:
+                    logging.info(f"Successfully sent proactive notification via stored reference to {user_email}")
+                    return True
+                logging.warning(
+                    f"Stored conversation reference send failed for {user_email}; "
+                    "falling back to direct conversation creation"
+                )
+
             # Resolve email to AAD Object ID for Bot Framework conversation creation
             user_aad_id = await self.get_user_aad_id(user_email)
             if not user_aad_id:
                 logging.error(f"Could not resolve AAD ID for {user_email}, cannot create conversation")
                 return False
-
-            member_id = f"29:{user_aad_id}"
-
             headers = {
                 'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json'
             }
-
-            # Step 1: Create a conversation with the user
-            # The bot needs to create a 1:1 chat to send proactive messages
-            create_conv_url = f"{self.service_url}v3/conversations"
-
-            conversation_params = {
-                'bot': {
-                    'id': self.app_id,
-                    'name': 'IT Support Bot'
-                },
-                'members': [
-                    {
-                        'id': member_id,
-                        'name': user_email
-                    }
-                ],
-                'channelData': {
-                    'tenant': {
-                        'id': self.tenant_id
-                    }
-                },
-                'isGroup': False
-            }
-
             loop = asyncio.get_event_loop()
-
-            def create_conversation():
-                response = requests.post(
-                    create_conv_url,
-                    headers=headers,
-                    json=conversation_params,
-                    timeout=30
-                )
-                if response.status_code in [200, 201, 202]:
-                    return response.json()
-                else:
-                    logging.error(f"Failed to create conversation: {response.status_code} - {response.text}")
-                    return None
-
-            conv_response = await loop.run_in_executor(self.executor, create_conversation)
+            conv_response = await self._create_personal_conversation(token, user_email, user_aad_id)
 
             if not conv_response:
                 logging.error(f"Could not create conversation with user {user_email}")
@@ -605,6 +815,11 @@ class TeamsHandler:
                     json=message_activity,
                     timeout=30
                 )
+                if response.status_code not in [200, 201, 202]:
+                    logging.error(
+                        f"Failed to send card to conversation {conversation_id}: "
+                        f"{response.status_code} - {response.text}"
+                    )
                 return response.status_code in [200, 201, 202]
 
             success = await loop.run_in_executor(self.executor, send_message)

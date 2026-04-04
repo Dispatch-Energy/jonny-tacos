@@ -223,8 +223,13 @@ class QuickBaseManager:
                 ])
                 where_clause = f"({where_clause}) AND ({status_conditions})"
             else:
-                # Default to non-closed tickets
-                where_clause = f"({where_clause}) AND {{{self.field_mapping['status']}.NE.'Closed'}}"
+                # Default to active tickets only
+                active_statuses = ['New', 'In Progress', 'Awaiting User', 'Awaiting IT']
+                active_conditions = " OR ".join([
+                    f"{{{self.field_mapping['status']}.EX.'{status}'}}"
+                    for status in active_statuses
+                ])
+                where_clause = f"({where_clause}) AND ({active_conditions})"
             
             query_data = {
                 "from": self.table_id,

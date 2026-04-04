@@ -116,10 +116,6 @@ class ConversationStream:
     should map to a single ticket, not 3 separate ones.
     """
 
-    # How long (seconds) a conversation stream stays active before expiring.
-    # Messages within this window from the same user are likely related.
-    STREAM_WINDOW_SECONDS = 1800  # 30 minutes
-
     # Short messages that are almost always conversational follow-ups
     CHATTY_PATTERNS = [
         "yes", "no", "ok", "okay", "sure", "thanks", "thank you", "ty",
@@ -133,6 +129,8 @@ class ConversationStream:
     ]
 
     def __init__(self):
+        # Keep the stream reasonably short so stale tickets are not reused.
+        self.stream_window_seconds = int(os.getenv("FOLLOW_UP_STREAM_WINDOW_SECONDS", "900"))
         # { user_email: [ { "message": str, "timestamp": float, "ticket_number": str|None } ] }
         self._streams: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
@@ -186,7 +184,7 @@ class ConversationStream:
 
     def _prune(self, user_email: str) -> None:
         """Remove messages older than the stream window."""
-        cutoff = time.time() - self.STREAM_WINDOW_SECONDS
+        cutoff = time.time() - self.stream_window_seconds
         self._streams[user_email] = [
             entry for entry in self._streams.get(user_email, [])
             if entry["timestamp"] > cutoff
