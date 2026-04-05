@@ -12,8 +12,8 @@ from function_app import (
 
 
 class FunctionAppTests(unittest.TestCase):
-    def test_quick_fix_does_not_auto_create_ticket(self):
-        self.assertFalse(
+    def test_quick_fix_still_creates_ticket(self):
+        self.assertTrue(
             should_auto_create_ticket(
                 question="My VPN is being weird",
                 needs_human=False,
@@ -70,7 +70,7 @@ class FunctionAppTests(unittest.TestCase):
             question="Teams keeps freezing",
             category="Teams/Office 365",
             confidence=0.8,
-            offer_escalate=False,
+            offer_escalate=True,
             ticket_number="IT-1234",
             ticket_state="created",
         )
@@ -83,7 +83,7 @@ class FunctionAppTests(unittest.TestCase):
         actions = [action["title"] for action in card["actions"]]
 
         self.assertIn("📋 Check Ticket", actions)
-        self.assertNotIn("🎫 Still need help", actions)
+        self.assertIn("🛠️ Need IT follow-up", actions)
         self.assertIn("Here's what I'd try next", body_text)
 
         emphasis_items = [
@@ -92,24 +92,24 @@ class FunctionAppTests(unittest.TestCase):
         ]
         self.assertTrue(any("Ticket opened: IT-1234" in str(item) for item in emphasis_items))
 
-    def test_solution_card_shows_no_ticket_yet_state(self):
+    def test_solution_card_shows_no_ticket_yet_state_on_failure_path(self):
         card = create_solution_card(
             solution="Restart Outlook and test again.",
             question="Outlook is slow",
             category="Email Issues",
             confidence=0.9,
             offer_escalate=True,
-            ticket_state="not_created",
+            ticket_state="required_failed",
         )
 
         actions = [action["title"] for action in card["actions"]]
-        emphasis_items = [
+        attention_items = [
             item for item in card["body"]
-            if item.get("type") == "Container" and item.get("style") == "emphasis"
+            if item.get("type") == "Container" and item.get("style") == "attention"
         ]
 
         self.assertIn("🎫 Still need help", actions)
-        self.assertTrue(any("No ticket yet" in str(item) for item in emphasis_items))
+        self.assertTrue(any("couldn't open the ticket automatically" in str(item) for item in attention_items))
 
     def test_extract_and_normalize_webhook_payload(self):
         payload = {

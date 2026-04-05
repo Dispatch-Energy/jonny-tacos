@@ -173,7 +173,7 @@ def get_follow_up_candidate_tickets(tickets: list) -> list:
     """
     lookback_days = int(os.environ.get('FOLLOW_UP_TICKET_LOOKBACK_DAYS', '7'))
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=lookback_days)
-    active_statuses = {'New', 'In Progress', 'Awaiting User', 'Awaiting IT'}
+    active_statuses = {'New', 'Bot Assisted', 'In Progress', 'Awaiting User', 'Awaiting IT'}
 
     candidates = []
     for ticket in tickets:
@@ -426,7 +426,7 @@ async def handle_support_question(
             ticket_priority = priority
             offer_escalate = False  # Already getting IT attention
         else:
-            ticket_status = 'New'  # Only used when user explicitly asks for a ticket
+            ticket_status = 'Bot Assisted'  # Bot solved or largely resolved it
             ticket_priority = 'Low'
             offer_escalate = True  # User can escalate if needed
 
@@ -447,6 +447,19 @@ async def handle_support_question(
             logging.info(
                 f"Skipping ticket creation - follow-up to {related_ticket or 'existing conversation'}"
             )
+            if related_ticket and should_escalate_existing_ticket(question, needs_human, confidence):
+                updated = await qb.update_ticket({
+                    'ticket_id': related_ticket,
+                    'status': 'New'
+                })
+                if updated:
+                    logging.info(f"Escalated existing ticket {related_ticket} back to New")
+                    escalated_ticket = await qb.get_ticket(related_ticket)
+                    if escalated_ticket:
+                        await notify_it_channel(escalated_ticket)
+                else:
+                    logging.warning(f"Failed to escalate existing ticket {related_ticket}")
+                offer_escalate = False
         elif should_create_ticket:
             # When filing on behalf of someone else, the ticket's "Submitted By"
             # is set to the target user so it appears under their name in QuickBase.
@@ -580,19 +593,14 @@ def should_auto_create_ticket(
     on_behalf_of: Optional[str] = None
 ) -> bool:
     """
-    Decide when the bot should open a QuickBase ticket automatically.
-
-    High-confidence self-service answers stay conversational by default.
-    Tickets are opened when a human needs to act, confidence is low, the
-    user explicitly requests escalation, or the message is filed on behalf
-    of another person.
+    Every new issue gets a ticket. Dedupe happens before this decision.
     """
-    return any([
-        needs_human,
-        confidence < 0.5,
-        bool(on_behalf_of),
-        is_explicit_ticket_request(question)
-    ])
+    return True
+
+
+def should_escalate_existing_ticket(question: str, needs_human: bool, confidence: float) -> bool:
+    """Determine when an existing ticket should be moved back into the IT queue."""
+    return needs_human or confidence < 0.5 or is_explicit_ticket_request(question)
 
 
 def create_solution_card(
@@ -657,8 +665,8 @@ def create_solution_card(
                         "I opened this in QuickBase and will keep follow-up replies tied to the same request. "
                         "This needs an IT Admin to make the change, and they will review it during business hours."
                         if needs_human else
-                        "I logged this in QuickBase so there is a clear handoff if you still need IT involved. "
-                        "Reply below and I'll keep follow-ups tied to this ticket."
+                        "I logged this in QuickBase as **Bot Assisted** so the bot gets credit for solving it. "
+                        "If the fix doesn't hold, use **Need IT follow-up** and I'll route the same ticket to IT."
                     ),
                     "wrap": True,
                     "isSubtle": True,
@@ -805,14 +813,15 @@ def create_solution_card(
         }
     })
 
-    if offer_escalate and ticket_state not in ("created", "existing"):
+    if offer_escalate:
         actions.append({
             "type": "Action.Submit",
-            "title": "🎫 Still need help",
+            "title": "🛠️ Need IT follow-up" if ticket_number else "🎫 Still need help",
             "data": {
                 "action": "escalate_ticket",
                 "question": question[:200],
-                "category": category
+                "category": category,
+                "ticket_number": ticket_number or ""
             }
         })
 
@@ -948,14 +957,61 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
             # User wants to escalate after bot solution didn't help
             question = action_data.get('question', 'Issue not resolved')
             category = action_data.get('category', 'General Support')
-            
-            ticket_form = cards.create_ticket_form(
-                subject=generate_subject(question),
-                description=f"{question}\n\n[User tried self-service but still needs help]",
-                category=category,
-                priority='Medium'
-            )
-            await teams.update_card(activity, ticket_form)
+            ticket_number = action_data.get('ticket_number', '').strip()
+
+            if ticket_number:
+                updated = await qb.update_ticket({
+                    'ticket_id': ticket_number,
+                    'status': 'New'
+                })
+                if updated:
+                    escalated_ticket = await qb.get_ticket(ticket_number)
+                    if escalated_ticket:
+                        await notify_it_channel(escalated_ticket)
+                    escalated_card = {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.5",
+                        "body": [
+                            {
+                                "type": "TextBlock",
+                                "text": f"🛠️ Ticket {ticket_number} sent to IT",
+                                "weight": "Bolder",
+                                "size": "Medium",
+                                "color": "Accent"
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": "I updated the existing Bot Assisted ticket so the IT team knows you still need help.",
+                                "wrap": True,
+                                "spacing": "Small"
+                            }
+                        ],
+                        "actions": [
+                            {
+                                "type": "Action.Submit",
+                                "title": "📋 Check Ticket",
+                                "data": {
+                                    "action": "check_status",
+                                    "ticket_number": ticket_number
+                                }
+                            }
+                        ]
+                    }
+                    await teams.update_card(activity, escalated_card)
+                else:
+                    await teams.send_message(
+                        activity,
+                        f"I couldn't update ticket {ticket_number}. Please try /status or /ticket."
+                    )
+            else:
+                ticket_form = cards.create_ticket_form(
+                    subject=generate_subject(question),
+                    description=f"{question}\n\n[User tried self-service but still needs help]",
+                    category=category,
+                    priority='Medium'
+                )
+                await teams.update_card(activity, ticket_form)
         
         elif action_type == 'reply_to_solution':
             # User sent a follow-up reply from the inline chat bar on the solution card
@@ -1000,6 +1056,27 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
                 reply_sources = result.get('sources', [])
                 reply_needs_human = result.get('needs_human', False)
                 reply_ticket_state = "existing" if reply_ticket else "not_created"
+                reply_should_escalate_existing = (
+                    bool(reply_ticket)
+                    and should_escalate_existing_ticket(
+                        reply_text,
+                        reply_needs_human,
+                        reply_confidence
+                    )
+                )
+
+                if reply_should_escalate_existing:
+                    updated = await qb.update_ticket({
+                        'ticket_id': reply_ticket,
+                        'status': 'New'
+                    })
+                    if updated:
+                        logging.info(f"Escalated existing ticket {reply_ticket} based on follow-up reply")
+                        escalated_ticket = await qb.get_ticket(reply_ticket)
+                        if escalated_ticket:
+                            await notify_it_channel(escalated_ticket)
+                    else:
+                        logging.warning(f"Failed to escalate existing ticket {reply_ticket} from follow-up reply")
 
                 if not reply_ticket and should_auto_create_ticket(
                     question=reply_text,
@@ -1032,7 +1109,10 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
                         await notify_it_channel(created_ticket)
                     else:
                         reply_ticket_state = "required_failed"
-                offer_reply_escalate = (not reply_needs_human) or reply_ticket_state == "required_failed"
+                offer_reply_escalate = (
+                    ((not reply_needs_human) and not reply_should_escalate_existing)
+                    or reply_ticket_state == "required_failed"
+                )
 
                 # Send a new solution card as a reply (keeping the conversation threaded)
                 follow_up_card = create_solution_card(
@@ -2063,6 +2143,7 @@ def create_status_update_card(ticket_data: Dict[str, Any]) -> Dict:
     # Status icons and colors for the timeline
     status_config = {
         'New': {'icon': '🆕', 'color': 'Default'},
+        'Bot Assisted': {'icon': '🤖', 'color': 'Good'},
         'In Progress': {'icon': '🔧', 'color': 'Accent'},
         'Awaiting User': {'icon': '⏳', 'color': 'Warning'},
         'Awaiting IT': {'icon': '👨‍💻', 'color': 'Warning'},
@@ -2182,6 +2263,7 @@ def create_status_update_card(ticket_data: Dict[str, Any]) -> Dict:
 
     # Add contextual message based on new status
     status_messages = {
+        'Bot Assisted': "The bot marked this as Bot Assisted. If the issue comes back, use the ticket to request IT follow-up.",
         'In Progress': "Your ticket is now being worked on by the IT team.",
         'Awaiting User': "The IT team needs more information from you. Please check your ticket and respond.",
         'Awaiting IT': "Your response has been received. The IT team will follow up shortly.",

@@ -72,6 +72,7 @@ class QuickBaseManager:
         # Status options
         self.status_values = [
             'New',
+            'Bot Assisted',
             'In Progress',
             'Awaiting User',
             'Awaiting IT',
@@ -224,7 +225,7 @@ class QuickBaseManager:
                 where_clause = f"({where_clause}) AND ({status_conditions})"
             else:
                 # Default to active tickets only
-                active_statuses = ['New', 'In Progress', 'Awaiting User', 'Awaiting IT']
+                active_statuses = ['New', 'Bot Assisted', 'In Progress', 'Awaiting User', 'Awaiting IT']
                 active_conditions = " OR ".join([
                     f"{{{self.field_mapping['status']}.EX.'{status}'}}"
                     for status in active_statuses
