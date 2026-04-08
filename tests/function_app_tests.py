@@ -2,6 +2,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from function_app import (
+    create_user_creation_approval_card,
+    create_user_creation_confirmation_card,
     create_solution_card,
     extract_webhook_ticket_data,
     get_follow_up_candidate_tickets,
@@ -118,6 +120,8 @@ class FunctionAppTests(unittest.TestCase):
                 "Submitted By": "user@example.com",
                 "Previous Status": "New",
                 "Status": "In Progress",
+                "Description": "Diana,Boylan;diana.boylan@gmail.com",
+                "Due Date": "2025-01-15",
             }]
         }
 
@@ -128,6 +132,60 @@ class FunctionAppTests(unittest.TestCase):
         self.assertEqual(normalized["submitted_by"], "user@example.com")
         self.assertEqual(normalized["old_status"], "New")
         self.assertEqual(normalized["status"], "In Progress")
+        self.assertEqual(normalized["description"], "Diana,Boylan;diana.boylan@gmail.com")
+        self.assertEqual(normalized["due_date"], "2025-01-15")
+
+    def test_user_creation_confirmation_card_includes_ticket_details(self):
+        card = create_user_creation_confirmation_card(
+            {
+                "ticket_number": "IT-5555",
+                "submitted_by": "requester@example.com",
+                "quickbase_url": "https://example.quickbase.com/db/abc?a=dr&rid=1",
+            },
+            {
+                "display_name": "Diana Boylan",
+                "user_principal_name": "dboylan@example.com",
+                "recipient_email": "diana.boylan@gmail.com",
+                "email_queued_for": "2025-01-15T10:00:00+00:00",
+                "openai_invite": {"success": True},
+                "anthropic_invite": {"success": True},
+            }
+        )
+
+        facts = []
+        for item in card["body"]:
+            if item.get("type") == "Container":
+                for child in item.get("items", []):
+                    if child.get("type") == "FactSet":
+                        facts.extend(child.get("facts", []))
+
+        self.assertIn("User Creation Completed", str(card))
+        self.assertTrue(any(fact["value"] == "IT-5555" for fact in facts))
+        self.assertTrue(any(fact["value"] == "dboylan@example.com" for fact in facts))
+        self.assertTrue(any(fact["title"] == "Credential Recipient:" and fact["value"] == "diana.boylan@gmail.com" for fact in facts))
+        self.assertTrue(any(fact["title"] == "OpenAI:" and fact["value"] == "Invited" for fact in facts))
+        self.assertTrue(any(fact["title"] == "Claude:" and fact["value"] == "Invited" for fact in facts))
+        self.assertEqual(card["actions"][0]["title"], "View in QuickBase")
+
+    def test_user_creation_approval_card_prefills_predicted_username(self):
+        card = create_user_creation_approval_card(
+            {
+                "ticket_number": "IT-7777",
+                "submitted_by": "requester@example.com",
+                "due_date": "2025-01-15",
+            },
+            {
+                "request_id": "IT-7777",
+                "display_name": "Diana Boylan",
+                "personal_email": "diana.boylan@gmail.com",
+                "predicted_username_local": "dboylan",
+                "predicted_user_principal_name": "dboylan@example.com",
+            }
+        )
+
+        self.assertIn("Confirm User Creation", str(card))
+        self.assertEqual(card["body"][1]["items"][2]["value"], "dboylan")
+        self.assertEqual(card["actions"][0]["data"]["action"], "user_creation_approve")
 
 
 if __name__ == "__main__":

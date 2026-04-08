@@ -164,6 +164,7 @@ scratch.py
 test_*.py
 !test_unit.py
 !test_integration.py
+!tests/test_*.py
 
 # Backup files
 *.bak

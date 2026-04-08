@@ -430,6 +430,7 @@ class AdaptiveCardBuilder:
                                                 {"title": "File Access", "value": "File Access"},
                                                 {"title": "Security Concern", "value": "Security Concern"},
                                                 {"title": "New User Setup", "value": "New User Setup"},
+                                                {"title": "User Creation", "value": "User Creation"},
                                                 {"title": "General Support", "value": "General Support"},
                                                 {"title": "Other", "value": "Other"}
                                             ],

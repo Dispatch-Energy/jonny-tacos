@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from xml.etree import ElementTree
 
 class QuickBaseManager:
     def __init__(self):
@@ -17,7 +18,14 @@ class QuickBaseManager:
         self.realm = os.environ.get('QB_REALM', '')
         self.user_token = os.environ.get('QB_USER_TOKEN', '')
         self.app_id = os.environ.get('QB_APP_ID', '')
+        self.app_token = os.environ.get('QB_APP_TOKEN', '')
+        self.user_creation_app_id = os.environ.get('QB_USER_CREATION_APP_ID', '')
+        self.user_creation_app_token = os.environ.get('QB_USER_CREATION_APP_TOKEN', '')
         self.table_id = os.environ.get('QB_TICKETS_TABLE_ID', '')
+        self.user_creation_user_token = os.environ.get(
+            'QB_USER_CREATION_USER_TOKEN',
+            self.user_token
+        )
         
         self.base_url = f"https://api.quickbase.com/v1"
         self.headers = {
@@ -65,6 +73,7 @@ class QuickBaseManager:
             'File Access',
             'Security Concern',
             'New User Setup',
+            'User Creation',
             'General Support',
             'Other'
         ]
@@ -82,6 +91,7 @@ class QuickBaseManager:
         ]
         
         self.executor = ThreadPoolExecutor(max_workers=5)
+        self._role_id_cache: Dict[str, Dict[str, str]] = {}
 
     async def create_ticket(self, ticket_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -209,6 +219,48 @@ class QuickBaseManager:
             logging.error(f"Error getting ticket {ticket_number}: {str(e)}")
             return None
 
+    async def get_ticket_by_record_id(self, record_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get ticket details by QuickBase record ID.
+        """
+        try:
+            query_data = {
+                "from": self.table_id,
+                "select": list(self.field_mapping.values()),
+                "where": f"{{3.EX.'{record_id}'}}"
+            }
+
+            response = await self.execute_request(
+                'POST',
+                f"{self.base_url}/records/query",
+                query_data
+            )
+
+            if response and response.get('data') and len(response['data']) > 0:
+                return self.format_ticket_response(response['data'][0])
+
+            return None
+
+        except Exception as e:
+            logging.error(f"Error getting ticket by record_id {record_id}: {str(e)}")
+            return None
+
+    async def get_ticket_by_reference(
+        self,
+        ticket_number: Optional[str] = None,
+        record_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Resolve a ticket by ticket number or record ID.
+        """
+        if ticket_number:
+            ticket = await self.get_ticket(ticket_number)
+            if ticket:
+                return ticket
+        if record_id:
+            return await self.get_ticket_by_record_id(record_id)
+        return None
+
     async def get_user_tickets(self, user_email: str, status_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
         Get all tickets for a specific user by their email in Submitted By field (ID 19)
@@ -265,7 +317,10 @@ class QuickBaseManager:
         """
         try:
             # First get the record ID for the ticket
-            ticket = await self.get_ticket(ticket_update.get('ticket_id'))
+            ticket = await self.get_ticket_by_reference(
+                ticket_number=ticket_update.get('ticket_id'),
+                record_id=ticket_update.get('record_id')
+            )
             if not ticket:
                 return False
             
@@ -305,6 +360,48 @@ class QuickBaseManager:
             
         except Exception as e:
             logging.error(f"Error updating ticket: {str(e)}")
+            return False
+
+    async def append_ticket_resolution_note(
+        self,
+        ticket_number: Optional[str],
+        note: str,
+        status: Optional[str] = None,
+        record_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Append a note to the resolution field without discarding existing history.
+        """
+        try:
+            ticket = await self.get_ticket_by_reference(
+                ticket_number=ticket_number,
+                record_id=record_id
+            )
+            if not ticket:
+                return False
+
+            existing_resolution = (ticket.get('resolution') or '').strip()
+            new_note = (note or '').strip()
+            if not new_note:
+                return False
+
+            resolution = (
+                f"{existing_resolution}\n\n{new_note}"
+                if existing_resolution else new_note
+            )
+            update_data = {
+                'ticket_id': ticket.get('ticket_number'),
+                'record_id': ticket.get('record_id'),
+                'resolution': resolution
+            }
+            if status:
+                update_data['status'] = status
+
+            return await self.update_ticket(update_data)
+        except Exception as e:
+            logging.error(
+                f"Error appending resolution note for {ticket_number or record_id}: {str(e)}"
+            )
             return False
 
     async def resolve_ticket(self, ticket_number: str, resolution: str, resolved_by: str) -> bool:
@@ -491,3 +588,187 @@ class QuickBaseManager:
                 return None
         
         return await loop.run_in_executor(self.executor, make_request)
+
+    async def execute_legacy_api(
+        self,
+        action: str,
+        dbid: str,
+        xml_fields: Dict[str, Any],
+        user_token: Optional[str] = None,
+    ) -> Optional[ElementTree.Element]:
+        """
+        Execute a QuickBase legacy XML API call.
+        """
+        loop = asyncio.get_event_loop()
+        token = user_token or self.user_token
+
+        def make_request():
+            try:
+                root = ElementTree.Element('qdbapi')
+                for key, value in xml_fields.items():
+                    if value in (None, ''):
+                        continue
+                    child = ElementTree.SubElement(root, key)
+                    child.text = str(value)
+
+                if token:
+                    usertoken_el = ElementTree.SubElement(root, 'usertoken')
+                    usertoken_el.text = token
+                target_app_token = ''
+                if dbid == self.app_id and self.app_token:
+                    target_app_token = self.app_token
+                elif dbid == self.user_creation_app_id and self.user_creation_app_token:
+                    target_app_token = self.user_creation_app_token
+                if target_app_token:
+                    apptoken_el = ElementTree.SubElement(root, 'apptoken')
+                    apptoken_el.text = target_app_token
+
+                payload = ElementTree.tostring(root, encoding='utf-8')
+                response = requests.post(
+                    f"https://{self.realm}/db/{dbid}",
+                    headers={
+                        'QUICKBASE-ACTION': action,
+                        'Content-Type': 'application/xml'
+                    },
+                    data=payload,
+                    timeout=30,
+                )
+                response.raise_for_status()
+                return ElementTree.fromstring(response.text)
+            except Exception as e:
+                logging.error(f"QuickBase legacy API request failed ({action}): {str(e)}")
+                return None
+
+        return await loop.run_in_executor(self.executor, make_request)
+
+    @staticmethod
+    def _legacy_text(root: Optional[ElementTree.Element], tag: str) -> str:
+        if root is None:
+            return ''
+        node = root.find(tag)
+        return node.text.strip() if node is not None and node.text else ''
+
+    async def get_quickbase_user_id(self, email: str) -> Optional[str]:
+        """
+        Look up a QuickBase user ID by email address.
+        """
+        root = await self.execute_legacy_api(
+            'API_GetUserInfo',
+            'main',
+            {'email': email},
+            user_token=self.user_creation_user_token,
+        )
+        if root is None:
+            return None
+
+        errcode = self._legacy_text(root, 'errcode')
+        if errcode == '0':
+            return self._legacy_text(root, 'userid') or self._legacy_text(root, 'uid')
+
+        logging.info(
+            f"QuickBase user lookup for {email} returned errcode={errcode} "
+            f"errtext={self._legacy_text(root, 'errtext')}"
+        )
+        return None
+
+    async def get_app_role_id(self, app_id: str, role_name: str) -> Optional[str]:
+        """
+        Resolve a role name to its QuickBase role ID for an application.
+        """
+        cached = self._role_id_cache.get(app_id, {}).get(role_name.lower())
+        if cached:
+            return cached
+
+        root = await self.execute_legacy_api(
+            'API_GetRoleInfo',
+            app_id,
+            {},
+            user_token=self.user_creation_user_token,
+        )
+        if root is None:
+            return None
+
+        errcode = self._legacy_text(root, 'errcode')
+        if errcode != '0':
+            logging.error(
+                f"Failed to load QuickBase role info for {app_id}: "
+                f"{self._legacy_text(root, 'errtext')}"
+            )
+            return None
+
+        role_map = self._role_id_cache.setdefault(app_id, {})
+        for role in root.findall('.//role'):
+            role_id = role.get('id') or self._legacy_text(role, 'id')
+            name = (role.get('name') or self._legacy_text(role, 'name')).strip()
+            if role_id and name:
+                role_map[name.lower()] = role_id
+
+        return role_map.get(role_name.lower())
+
+    async def ensure_app_user_in_role(
+        self,
+        email: str,
+        first_name: str,
+        last_name: str,
+        app_id: str,
+        role_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Ensure a user exists in QuickBase and is assigned to the target app role.
+        """
+        role_id = await self.get_app_role_id(app_id, role_name)
+        if not role_id:
+            return {
+                'success': False,
+                'error': f"Could not resolve QuickBase role '{role_name}' in app {app_id}",
+            }
+
+        user_id = await self.get_quickbase_user_id(email)
+        if user_id:
+            root = await self.execute_legacy_api(
+                'API_AddUserToRole',
+                app_id,
+                {
+                    'userid': user_id,
+                    'roleid': role_id,
+                },
+                user_token=self.user_creation_user_token,
+            )
+            if root is None:
+                return {'success': False, 'error': 'QuickBase API_AddUserToRole failed'}
+
+            errcode = self._legacy_text(root, 'errcode')
+            errtext = self._legacy_text(root, 'errtext')
+            if errcode == '0' or 'already' in errtext.lower():
+                return {
+                    'success': True,
+                    'user_id': user_id,
+                    'provisioned': False,
+                }
+
+            return {'success': False, 'error': errtext or f'QuickBase errcode {errcode}'}
+
+        root = await self.execute_legacy_api(
+            'API_ProvisionUser',
+            app_id,
+            {
+                'email': email,
+                'fname': first_name,
+                'lname': last_name,
+                'roleid': role_id,
+            },
+            user_token=self.user_creation_user_token,
+        )
+        if root is None:
+            return {'success': False, 'error': 'QuickBase API_ProvisionUser failed'}
+
+        errcode = self._legacy_text(root, 'errcode')
+        errtext = self._legacy_text(root, 'errtext')
+        if errcode == '0':
+            return {
+                'success': True,
+                'user_id': self._legacy_text(root, 'userid') or self._legacy_text(root, 'uid'),
+                'provisioned': True,
+            }
+
+        return {'success': False, 'error': errtext or f'QuickBase errcode {errcode}'}

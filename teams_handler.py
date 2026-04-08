@@ -40,6 +40,10 @@ class TeamsHandler:
             'TEAMS_CONVERSATION_CONTAINER',
             'teams-conversation-references'
         )
+        self.conversation_fallback_dir = os.environ.get(
+            'TEAMS_CONVERSATION_FALLBACK_DIR',
+            os.path.join(os.getcwd(), '.local', 'teams-conversation-references')
+        )
         self._blob_service_client = None
         self._conversation_container_ready = False
 
@@ -470,6 +474,12 @@ class TeamsHandler:
         safe_email = re.sub(r'[^a-z0-9._-]+', '_', user_email.lower())
         return f"{safe_email}.json"
 
+    def _conversation_fallback_path(self, user_email: str) -> str:
+        return os.path.join(
+            self.conversation_fallback_dir,
+            self._conversation_blob_name(user_email)
+        )
+
     async def _get_conversation_container_client(self):
         """Get a blob container client for persisted conversation references."""
         if not BlobServiceClient or not self.storage_connection_string:
@@ -511,16 +521,34 @@ class TeamsHandler:
         if not user_email or not self.is_personal_conversation(activity):
             return False
 
-        container_client = await self._get_conversation_container_client()
-        if not container_client:
-            return False
-
         reference = self.create_conversation_reference(activity)
         reference['user_email'] = user_email
         reference['stored_at'] = datetime.utcnow().isoformat() + 'Z'
-        blob_name = self._conversation_blob_name(user_email)
 
         loop = asyncio.get_event_loop()
+
+        container_client = await self._get_conversation_container_client()
+        if not container_client:
+            fallback_path = self._conversation_fallback_path(user_email)
+
+            def write_local():
+                try:
+                    os.makedirs(self.conversation_fallback_dir, exist_ok=True)
+                    with open(fallback_path, 'w', encoding='utf-8') as f:
+                        json.dump(reference, f)
+                    return True
+                except Exception as e:
+                    logging.error(
+                        f"Failed to store local conversation reference for {user_email}: {str(e)}"
+                    )
+                    return False
+
+            success = await loop.run_in_executor(self.executor, write_local)
+            if success:
+                logging.info(f"Stored personal conversation reference locally for {user_email}")
+            return success
+
+        blob_name = self._conversation_blob_name(user_email)
 
         def upload():
             try:
@@ -541,12 +569,25 @@ class TeamsHandler:
         if not user_email:
             return None
 
+        loop = asyncio.get_event_loop()
+
         container_client = await self._get_conversation_container_client()
         if not container_client:
-            return None
+            fallback_path = self._conversation_fallback_path(user_email)
+
+            def read_local():
+                try:
+                    with open(fallback_path, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+                except Exception:
+                    return None
+
+            reference = await loop.run_in_executor(self.executor, read_local)
+            if reference:
+                logging.info(f"Loaded local conversation reference for {user_email}")
+            return reference
 
         blob_name = self._conversation_blob_name(user_email)
-        loop = asyncio.get_event_loop()
 
         def download():
             try:

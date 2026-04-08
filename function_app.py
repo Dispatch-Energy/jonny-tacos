@@ -28,6 +28,7 @@ _teams_handler = None
 _qb_manager = None
 _card_builder = None
 _automation_manager = None
+_user_creation_manager = None
 
 
 def get_support_chain():
@@ -74,6 +75,15 @@ def get_automation_manager():
         # Register additional automation handlers here as they are built:
         # _automation_manager.register_handler(SomeOtherHandler())
     return _automation_manager
+
+
+def get_user_creation_manager():
+    """Get or initialize the user creation automation manager."""
+    global _user_creation_manager
+    if _user_creation_manager is None:
+        from user_creation_automation import UserCreationManager
+        _user_creation_manager = UserCreationManager()
+    return _user_creation_manager
 
 
 async def get_user_email(activity: Dict[str, Any]) -> str:
@@ -926,6 +936,17 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
                     status_code=200
                 )
 
+        if action_type and action_type.startswith('user_creation_'):
+            handled = await handle_user_creation_invoke(
+                action_type, action_data, activity, user_info
+            )
+            if handled:
+                return func.HttpResponse(
+                    json.dumps({"status": "ok"}),
+                    mimetype="application/json",
+                    status_code=200
+                )
+
         if action_type == 'create_ticket':
             # User submitted ticket form - resolve email via Teams API
             user_email = await get_user_email(activity)
@@ -1384,12 +1405,15 @@ def normalize_webhook_ticket_data(ticket_data: Dict[str, Any]) -> Dict[str, Any]
         'old_status': 'old_status',
         'previous_status': 'old_status',
         'prior_status': 'old_status',
+        'description': 'description',
+        'details': 'description',
         'submitted_by': 'submitted_by',
         'submitted_by_email': 'submitted_by',
         'user_email': 'submitted_by',
         'email': 'submitted_by',
         'category': 'category',
         'priority': 'priority',
+        'due_date': 'due_date',
         'resolution': 'resolution',
         'record_id': 'record_id',
         'rid': 'record_id',
@@ -1414,12 +1438,16 @@ async def enrich_webhook_ticket_data(ticket_data: Dict[str, Any]) -> Dict[str, A
         return ticket_data
 
     ticket_number = ticket_data.get('ticket_number')
-    if not ticket_number:
+    record_id = ticket_data.get('record_id')
+    if not ticket_number and not record_id:
         return ticket_data
 
     try:
         qb = get_qb_manager()
-        existing_ticket = await qb.get_ticket(ticket_number)
+        existing_ticket = await qb.get_ticket_by_reference(
+            ticket_number=ticket_number,
+            record_id=record_id
+        )
         if not existing_ticket:
             return ticket_data
 
@@ -1429,7 +1457,9 @@ async def enrich_webhook_ticket_data(ticket_data: Dict[str, Any]) -> Dict[str, A
                 enriched[key] = value
         return enriched
     except Exception as e:
-        logging.warning(f"Failed to enrich webhook ticket data for {ticket_number}: {e}")
+        logging.warning(
+            f"Failed to enrich webhook ticket data for {ticket_number or record_id}: {e}"
+        )
         return ticket_data
 
 
@@ -1704,6 +1734,471 @@ async def handle_provisioning_invoke(
         return True
 
     return False
+
+
+# =============================================================================
+# User Creation Notification Cards
+# =============================================================================
+
+def create_user_creation_approval_card(ticket_data: Dict[str, Any], request: Dict[str, Any]) -> Dict[str, Any]:
+    """Create the approval card sent before any user-creation code executes."""
+    ticket_label = ticket_data.get('ticket_number') or f"RID-{ticket_data.get('record_id', 'N/A')}"
+    facts = [
+        {"title": "Ticket:", "value": ticket_label},
+        {"title": "Requested By:", "value": ticket_data.get('submitted_by', 'N/A')},
+        {"title": "New User:", "value": request.get('display_name', 'N/A')},
+        {"title": "Personal Email:", "value": request.get('personal_email', 'N/A')},
+        {"title": "Proposed UPN:", "value": request.get('predicted_user_principal_name', 'N/A')},
+        {"title": "Due Date:", "value": ticket_data.get('due_date', 'N/A')},
+    ]
+
+    return {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": [
+            {
+                "type": "Container",
+                "style": "emphasis",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "🔐 Confirm User Creation",
+                        "weight": "Bolder",
+                        "size": "Large",
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": (
+                            "No provisioning has run yet. Confirm the Microsoft username "
+                            "below, then approve to create the user and continue the automation."
+                        ),
+                        "wrap": True,
+                        "isSubtle": True,
+                    },
+                ],
+            },
+            {
+                "type": "Container",
+                "separator": True,
+                "spacing": "Medium",
+                "items": [
+                    {"type": "FactSet", "facts": facts},
+                    {
+                        "type": "TextBlock",
+                        "text": "**Confirmed username**",
+                        "weight": "Bolder",
+                        "spacing": "Medium",
+                    },
+                    {
+                        "type": "Input.Text",
+                        "id": "username_local",
+                        "value": request.get('predicted_username_local', ''),
+                        "placeholder": "first initial + full last name",
+                        "isRequired": True,
+                        "errorMessage": "A username is required",
+                    },
+                ],
+            },
+        ],
+        "actions": [
+            {
+                "type": "Action.Submit",
+                "title": "✅ Approve and Create User",
+                "style": "positive",
+                "data": {
+                    "action": "user_creation_approve",
+                    "request_id": request.get('request_id', ''),
+                },
+            },
+            {
+                "type": "Action.Submit",
+                "title": "❌ Deny",
+                "data": {
+                    "action": "user_creation_deny",
+                    "request_id": request.get('request_id', ''),
+                },
+            },
+        ],
+    }
+
+def create_user_creation_confirmation_card(ticket_data: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a confirmation card for completed user provisioning setup."""
+    ticket_number = ticket_data.get('ticket_number') or f"RID-{ticket_data.get('record_id', 'N/A')}"
+    submitted_by = ticket_data.get('submitted_by', 'N/A')
+    display_name = result.get('display_name', 'New User')
+    username = result.get('user_principal_name', 'N/A')
+    recipient_email = result.get('recipient_email', 'N/A')
+    queued_for = result.get('email_queued_for', 'N/A')
+
+    facts = [
+        {"title": "Ticket:", "value": ticket_number},
+        {"title": "User:", "value": display_name},
+        {"title": "Username:", "value": username},
+        {"title": "Submitted By:", "value": submitted_by},
+        {"title": "Status:", "value": "Provisioned / Email Queued"},
+        {"title": "Credential Recipient:", "value": recipient_email},
+        {"title": "Email Queued For:", "value": queued_for},
+    ]
+
+    openai_result = result.get('openai_invite', {})
+    anthropic_result = result.get('anthropic_invite', {})
+    if openai_result:
+        facts.append({
+            "title": "OpenAI:",
+            "value": (
+                "Invited"
+                if openai_result.get('success') and not openai_result.get('skipped')
+                else openai_result.get('reason', 'Skipped')
+            )
+        })
+    if anthropic_result:
+        facts.append({
+            "title": "Claude:",
+            "value": (
+                "Invited"
+                if anthropic_result.get('success') and not anthropic_result.get('skipped')
+                else anthropic_result.get('reason', 'Skipped')
+            )
+        })
+
+    if ticket_data.get('quickbase_url'):
+        actions = [{
+            "type": "Action.OpenUrl",
+            "title": "View in QuickBase",
+            "url": ticket_data['quickbase_url']
+        }]
+    else:
+        actions = []
+
+    return {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": [
+            {
+                "type": "Container",
+                "style": "emphasis",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "✅ User Creation Completed",
+                        "weight": "Bolder",
+                        "size": "Large",
+                        "color": "Good"
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": "The account was created and the due-date credential email was queued.",
+                        "wrap": True,
+                        "isSubtle": True
+                    }
+                ]
+            },
+            {
+                "type": "Container",
+                "separator": True,
+                "spacing": "Medium",
+                "items": [
+                    {
+                        "type": "FactSet",
+                        "facts": facts
+                    }
+                ]
+            }
+        ],
+        "actions": actions
+    }
+
+
+def create_user_creation_failure_card(ticket_data: Dict[str, Any], error: str) -> Dict[str, Any]:
+    """Create a failure card for user creation automation errors."""
+    ticket_number = ticket_data.get('ticket_number') or f"RID-{ticket_data.get('record_id', 'N/A')}"
+    submitted_by = ticket_data.get('submitted_by', 'N/A')
+
+    actions = []
+    if ticket_data.get('quickbase_url'):
+        actions.append({
+            "type": "Action.OpenUrl",
+            "title": "View in QuickBase",
+            "url": ticket_data['quickbase_url']
+        })
+
+    return {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": [
+            {
+                "type": "Container",
+                "style": "attention",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "❌ User Creation Failed",
+                        "weight": "Bolder",
+                        "size": "Large",
+                        "color": "Attention"
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": f"Ticket {ticket_number} for {submitted_by} needs manual follow-up.",
+                        "wrap": True
+                    }
+                ]
+            },
+            {
+                "type": "TextBlock",
+                "text": error or "Unknown automation error",
+                "wrap": True,
+                "spacing": "Medium"
+            }
+        ],
+        "actions": actions
+    }
+
+
+async def send_user_creation_admin_failure(ticket_data: Dict[str, Any], error: str) -> None:
+    """Send a proactive failure card to the automation admin user."""
+    admin_email = get_automation_manager().admin_email
+    if not admin_email:
+        return
+
+    teams = get_teams_handler()
+    card = create_user_creation_failure_card(ticket_data, error)
+    sent = await teams.send_notification_to_user(admin_email, card)
+    if not sent:
+        logging.warning(
+            f"Failed to send user creation failure card to {admin_email} "
+            f"for ticket {ticket_data.get('ticket_number', 'N/A')}"
+        )
+
+
+async def send_user_creation_admin_approval(ticket_data: Dict[str, Any], request: Dict[str, Any]) -> bool:
+    """Send the pre-execution approval card to the automation admin."""
+    admin_email = get_automation_manager().admin_email
+    if not admin_email:
+        logging.warning(
+            "AUTOMATION_ADMIN_EMAIL not set - user creation approval card not sent."
+        )
+        return False
+
+    teams = get_teams_handler()
+    card = create_user_creation_approval_card(ticket_data, request)
+    sent = await teams.send_notification_to_user(admin_email, card)
+    if not sent:
+        logging.warning(
+            f"Failed to send user creation approval card to {admin_email} "
+            f"for ticket {ticket_data.get('ticket_number', 'N/A')}"
+        )
+    return sent
+
+
+async def handle_user_creation_invoke(
+    action_type: str, action_data: Dict, activity: Dict, user_info: Dict
+) -> bool:
+    """Handle approval actions for user creation automation."""
+    if not action_type.startswith('user_creation_'):
+        return False
+
+    teams = get_teams_handler()
+    manager = get_user_creation_manager()
+    request_id = action_data.get('request_id', '').strip()
+
+    if action_type == 'user_creation_approve':
+        request = await manager.get_approval_request(request_id)
+        if not request:
+            await teams.send_message(activity, "This user creation request has expired.")
+            return True
+
+        processing_card = {
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard",
+            "version": "1.5",
+            "body": [{
+                "type": "TextBlock",
+                "text": f"⏳ Creating {request.get('display_name', 'the user')}...",
+                "weight": "Bolder",
+                "color": "Good",
+                "wrap": True
+            }]
+        }
+        await teams.update_card(activity, processing_card)
+
+        result = await manager.execute_approved_request(
+            request_id=request_id,
+            username_value=action_data.get('username_local', ''),
+        )
+        ticket_data = request.get('ticket_data', {})
+
+        if result.get('success'):
+            await teams.update_card(
+                activity,
+                create_user_creation_confirmation_card(ticket_data, result)
+            )
+        else:
+            await teams.update_card(
+                activity,
+                create_user_creation_failure_card(
+                    ticket_data,
+                    result.get('error', 'Unknown automation error')
+                )
+            )
+        return True
+
+    if action_type == 'user_creation_deny':
+        result = await manager.deny_approval_request(
+            request_id=request_id,
+            denial_reason="Denied from approval card"
+        )
+        if result.get('success'):
+            denied_card = {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.5",
+                "body": [{
+                    "type": "TextBlock",
+                    "text": "❌ User creation automation denied.",
+                    "weight": "Bolder",
+                    "wrap": True
+                }]
+            }
+            await teams.update_card(activity, denied_card)
+        else:
+            await teams.send_message(activity, result.get('error', 'Approval request not found'))
+        return True
+
+    return False
+
+
+# =============================================================================
+# QuickBase Webhook - User Creation Automation
+# =============================================================================
+
+@app.route(route="webhook/user-creation", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+async def webhook_user_creation(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Webhook endpoint for QuickBase User Creation tickets.
+
+    QuickBase Webhook Configuration:
+    1. Create a webhook that fires when a ticket is created or updated
+    2. Limit it to records where Category = "User Creation"
+    3. Include at least: ticket_number, description, status, due_date,
+       submitted_by, category, and priority
+    """
+    logging.info("Received QuickBase webhook for user creation automation")
+
+    try:
+        webhook_secret = os.environ.get('QB_WEBHOOK_SECRET', '')
+        if webhook_secret:
+            provided_secret = req.headers.get('X-QB-Webhook-Secret', '')
+            if provided_secret != webhook_secret:
+                logging.warning("Invalid webhook secret provided")
+                return func.HttpResponse(
+                    json.dumps({"error": "Unauthorized"}),
+                    status_code=401,
+                    mimetype="application/json"
+                )
+
+        body = parse_webhook_body(req)
+        logging.info(f"User creation webhook payload: {json.dumps(body)}")
+
+        ticket_data = normalize_webhook_ticket_data(extract_webhook_ticket_data(body))
+        ticket_data = await enrich_webhook_ticket_data(ticket_data)
+
+        from user_creation_automation import is_user_creation_category
+
+        if not is_user_creation_category(ticket_data.get('category', '')):
+            return func.HttpResponse(
+                json.dumps({"status": "skipped", "reason": "category is not User Creation"}),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+        manager = get_user_creation_manager()
+        result = await manager.prepare_approval_request(ticket_data)
+
+        if result.get('success'):
+            request = result.get('request', {})
+            approval_sent = False
+            if request and not result.get('skipped'):
+                approval_sent = await send_user_creation_admin_approval(ticket_data, request)
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "pending_approval",
+                    "ticket_number": ticket_data.get('ticket_number', ''),
+                    "approval_sent": approval_sent,
+                    "result": result
+                }),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+        if result.get('skipped'):
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "skipped",
+                    "ticket_number": ticket_data.get('ticket_number', ''),
+                    "reason": result.get('reason', 'skipped')
+                }),
+                status_code=200,
+                mimetype="application/json"
+            )
+
+        ticket_number = ticket_data.get('ticket_number', '')
+        if ticket_number:
+            qb = get_qb_manager()
+            await qb.append_ticket_resolution_note(
+                ticket_number=ticket_number,
+                note=(
+                    "[USER_CREATION_ERROR]\n"
+                    f"{result.get('error', 'Unknown automation error')}"
+                ),
+                status='Awaiting IT'
+            )
+        await send_user_creation_admin_failure(
+            ticket_data,
+            result.get('error', 'Unknown automation error')
+        )
+
+        return func.HttpResponse(
+            json.dumps({
+                "status": "failed",
+                "ticket_number": ticket_number,
+                "error": result.get('error', 'Unknown automation error')
+            }),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+    except ValueError as e:
+        raw_body = req.get_body().decode('utf-8', errors='replace')[:500]
+        logging.error(f"Invalid JSON in user creation webhook payload: {str(e)} | Raw body: {raw_body}")
+        return func.HttpResponse(
+            json.dumps({"error": "Invalid JSON payload"}),
+            status_code=400,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logging.error(f"Error processing user creation webhook: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
+@app.schedule(schedule="0 */5 * * * *", arg_name="user_creation_email_timer", run_on_startup=False, use_monitor=True)
+async def user_creation_email_dispatcher(user_creation_email_timer: func.TimerRequest) -> None:
+    """Timer job that sends queued onboarding emails when their due time arrives."""
+    logging.info("Running scheduled user creation email dispatcher")
+
+    try:
+        manager = get_user_creation_manager()
+        result = await manager.dispatch_due_emails()
+        logging.info(f"User creation email dispatcher result: {json.dumps(result)}")
+    except Exception as e:
+        logging.error(f"User creation email dispatcher failed: {str(e)}")
 
 
 # =============================================================================
