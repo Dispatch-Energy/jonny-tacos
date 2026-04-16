@@ -97,6 +97,15 @@ class QuickBaseManager:
         """
         Create a new ticket in QuickBase
         """
+        subject = (ticket_data.get('subject') or '').strip()
+        description = (ticket_data.get('description') or '').strip()
+        if not subject or not description:
+            logging.warning(
+                "Blocked empty ticket creation: subject=%r description=%r",
+                subject, description
+            )
+            return None
+
         try:
             # Generate unique ticket number using timestamp (guaranteed unique)
             ticket_number = f"IT-{datetime.now().strftime('%y%m%d%H%M%S')}"
@@ -113,16 +122,15 @@ class QuickBaseManager:
             due_date_str = due_date.strftime('%Y-%m-%d')
             
             # Build description - include user name if provided
-            description = ticket_data.get('description', '')
             if ticket_data.get('user_name'):
                 description += f"\n\n---\nTeams User: {ticket_data.get('user_name')}"
-            
+
             # Prepare the record data
             record_data = {
                 "to": self.table_id,
                 "data": [{
                     self.field_mapping['ticket_number']: {"value": ticket_number},
-                    self.field_mapping['subject']: {"value": ticket_data.get('subject', 'No Subject')},
+                    self.field_mapping['subject']: {"value": subject},
                     self.field_mapping['description']: {"value": description},
                     self.field_mapping['priority']: {"value": ticket_data.get('priority', 'Medium')},
                     self.field_mapping['category']: {"value": ticket_data.get('category', 'General Support')},

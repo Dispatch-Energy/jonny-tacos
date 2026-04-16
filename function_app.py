@@ -951,20 +951,34 @@ async def handle_invoke(activity: Dict[str, Any]) -> func.HttpResponse:
             # User submitted ticket form - resolve email via Teams API
             user_email = await get_user_email(activity)
             user_name = user_info.get('name', 'Unknown User')
-            
+
+            subject = action_data.get('subject', '').strip()
+            description = action_data.get('description', '').strip()
+
+            if not subject or not description:
+                await teams.send_message(
+                    activity,
+                    "❌ Please fill in both **Subject** and **Description** before submitting a ticket."
+                )
+                return func.HttpResponse(
+                    json.dumps({"status": "ok"}),
+                    mimetype="application/json",
+                    status_code=200
+                )
+
             ticket_data = {
-                'subject': action_data.get('subject', 'No Subject'),
-                'description': action_data.get('description', ''),
+                'subject': subject,
+                'description': description,
                 'priority': action_data.get('priority', 'Medium'),
                 'category': action_data.get('category', 'General Support'),
                 'status': 'New',
                 'user_email': user_email,
                 'user_name': user_name
             }
-            
+
             if action_data.get('additional_info'):
                 ticket_data['description'] += f"\n\nAdditional info: {action_data['additional_info']}"
-            
+
             ticket = await qb.create_ticket(ticket_data)
             
             if ticket:
