@@ -21,13 +21,15 @@ import logging
 from typing import List, Optional
 
 import psycopg
+from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_core.retrievers import BaseRetriever
 from langchain_postgres import PGEngine, PGVectorStore
 
 logger = logging.getLogger(__name__)
 
 _CREATE_VIEW_SQL = """
-CREATE OR REPLACE VIEW langchainpg_chat_view AS
+CREATE VIEW IF NOT EXISTS langchainpg_chat_view AS
 SELECT
     c.id,
     c.text,
@@ -42,6 +44,16 @@ FROM dispatch_brain_documentchunk c
 INNER JOIN dispatch_brain_document d ON c.document_id = d.id
 WHERE c.embedding_chat IS NOT NULL;
 """
+
+class _EmptyRetriever(BaseRetriever):
+    """Returned when a SharePoint folder has no embedded documents yet."""
+
+    def _get_relevant_documents(self, query: str, **kwargs) -> List[Document]:
+        return []
+
+    async def _aget_relevant_documents(self, query: str, **kwargs) -> List[Document]:
+        return []
+
 
 _METADATA_COLUMNS = [
     "metadata",
@@ -144,8 +156,8 @@ def get_sharepoint_folder_vectorstore(
 
     doc_ids = _document_ids_for_folder(folder_path, db_url)
     if not doc_ids:
-        raise ValueError(
-            f"No embedded documents found under SharePoint folder: {folder_path}"
+        logger.warning(
+            "No embedded documents found under SharePoint folder: %s", folder_path
         )
 
     pg_engine = PGEngine.from_connection_string(url=db_url)
@@ -191,6 +203,13 @@ def get_sharepoint_folder_retriever(
     """
     store = get_sharepoint_folder_vectorstore(folder, db_url)
     doc_ids = store._sharepoint_document_ids
+
+    if not doc_ids:
+        logger.warning(
+            "Returning empty retriever for SharePoint folder with no documents: %s",
+            store._sharepoint_folder_path,
+        )
+        return _EmptyRetriever()
 
     return store.as_retriever(
         search_type="mmr",
