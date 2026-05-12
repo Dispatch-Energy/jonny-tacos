@@ -143,7 +143,7 @@ class AdaptiveCardBuilder:
                                 },
                                 {
                                     "title": "/ticket",
-                                    "value": "Create a new support ticket"
+                                    "value": "Open the ticket form (or just describe your issue)"
                                 },
                                 {
                                     "title": "/status [ticket#]",
@@ -260,7 +260,7 @@ class AdaptiveCardBuilder:
                                         },
                                         {
                                             "type": "TextBlock",
-                                            "text": "Create a new support ticket",
+                                            "text": "Prefer a form? Use /ticket to fill one out manually",
                                             "wrap": True,
                                             "isSubtle": True
                                         }
@@ -324,14 +324,6 @@ class AdaptiveCardBuilder:
                 }
             ],
             "actions": [
-                {
-                    "type": "Action.Submit",
-                    "title": "Create Ticket",
-                    "style": "positive",
-                    "data": {
-                        "action": "create_ticket_form"
-                    }
-                },
                 {
                     "type": "Action.Submit",
                     "title": "Check My Tickets",
@@ -724,15 +716,14 @@ class AdaptiveCardBuilder:
                     "text": message,
                     "wrap": True,
                     "spacing": "Medium"
+                },
+                {
+                    "type": "TextBlock",
+                    "text": "Just describe your issue in the chat and I'll take care of the rest.",
+                    "wrap": True,
+                    "spacing": "Medium",
+                    "isSubtle": True
                 }
             ],
-            "actions": [
-                {
-                    "type": "Action.Submit",
-                    "title": "🎫 Create Ticket",
-                    "data": {
-                        "action": "create_ticket_form"
-                    }
-                }
-            ]
+            "actions": []
         }
