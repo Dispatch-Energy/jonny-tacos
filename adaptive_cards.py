@@ -731,7 +731,7 @@ class AdaptiveCardBuilder:
                     "type": "Action.Submit",
                     "title": "🎫 Create Ticket",
                     "data": {
-                        "action": "create_ticket"
+                        "action": "create_ticket_form"
                     }
                 }
             ]
