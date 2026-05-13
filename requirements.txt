@@ -36,6 +36,8 @@ botframework-connector==4.14.3
 # Optional: For enhanced async support
 asyncio==3.4.3
 langchain==0.1.0
+langchain-community==0.0.20
+langchain-core==0.1.23
 langchain-openai==0.0.5
 langchain-postgres>=0.1.0
 psycopg[binary]>=3.1.0
