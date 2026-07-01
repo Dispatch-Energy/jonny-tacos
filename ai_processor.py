@@ -331,34 +331,53 @@ Format the response in a clear, friendly manner suitable for non-technical users
                     'Authorization': f'Bearer {self.api_key}',
                     'Content-Type': 'application/json'
                 }
-                
-                data = {
-                    'model': self.model,
-                    'messages': [
-                        {'role': 'system', 'content': system_prompt},
-                        {'role': 'user', 'content': user_prompt}
-                    ],
-                    'max_tokens': 500,
-                    'temperature': 0.7
-                }
-                
-                response = requests.post(
-                    self.endpoint,
-                    headers=headers,
-                    json=data,
-                    timeout=10
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    return result.get('choices', [{}])[0].get('message', {}).get('content', '')
-                
+
+                messages = [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ]
+
+                # Newer OpenAI reasoning models (gpt-5 class) reject 'max_tokens'
+                # (renamed 'max_completion_tokens') and non-default 'temperature'.
+                # Try the modern payload first, then fall back to the legacy one
+                # if the endpoint rejects the newer parameters.
+                payloads = [
+                    {'model': self.model, 'messages': messages, 'max_completion_tokens': 500},
+                    {'model': self.model, 'messages': messages, 'max_tokens': 500, 'temperature': 0.7},
+                ]
+
+                last_error = None
+                for attempt, data in enumerate(payloads):
+                    response = requests.post(
+                        self.endpoint,
+                        headers=headers,
+                        json=data,
+                        timeout=10
+                    )
+
+                    if response.status_code == 200:
+                        result = response.json()
+                        return result.get('choices', [{}])[0].get('message', {}).get('content', '')
+
+                    # Surface the real cause so failures are never silent (auth,
+                    # retired model/deployment, rate limit, bad params, etc.).
+                    body = response.text[:1000]
+                    last_error = f"HTTP {response.status_code}: {body}"
+                    logging.error(
+                        f"GPT-5 call failed (model={self.model}, attempt {attempt + 1}/{len(payloads)}): {last_error}"
+                    )
+
+                    # Only retry with the legacy payload when the modern params
+                    # were rejected; other errors won't be fixed by retrying.
+                    if response.status_code != 400:
+                        break
+
                 return None
-                
+
             except Exception as e:
-                logging.error(f"GPT-5 call failed: {str(e)}")
+                logging.error(f"GPT-5 call failed (model={self.model}): {str(e)}")
                 return None
-        
+
         return await loop.run_in_executor(self.executor, make_request)
 
     async def call_azure_openai(self, system_prompt: str, user_prompt: str) -> Optional[str]:
@@ -370,38 +389,51 @@ Format the response in a clear, friendly manner suitable for non-technical users
         def make_request():
             try:
                 url = f"{self.azure_endpoint}/openai/deployments/{self.deployment_name}/chat/completions?api-version=2024-02-15-preview"
-                
+
                 headers = {
                     'api-key': self.azure_api_key,
                     'Content-Type': 'application/json'
                 }
-                
-                data = {
-                    'messages': [
-                        {'role': 'system', 'content': system_prompt},
-                        {'role': 'user', 'content': user_prompt}
-                    ],
-                    'max_tokens': 500,
-                    'temperature': 0.7
-                }
-                
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=data,
-                    timeout=10
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    return result.get('choices', [{}])[0].get('message', {}).get('content', '')
-                
+
+                messages = [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ]
+
+                # Same param-deprecation guard as the primary endpoint: modern
+                # payload first, legacy payload on a 400.
+                payloads = [
+                    {'messages': messages, 'max_completion_tokens': 500},
+                    {'messages': messages, 'max_tokens': 500, 'temperature': 0.7},
+                ]
+
+                for attempt, data in enumerate(payloads):
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        json=data,
+                        timeout=10
+                    )
+
+                    if response.status_code == 200:
+                        result = response.json()
+                        return result.get('choices', [{}])[0].get('message', {}).get('content', '')
+
+                    body = response.text[:1000]
+                    logging.error(
+                        f"Azure OpenAI call failed (deployment={self.deployment_name}, "
+                        f"attempt {attempt + 1}/{len(payloads)}): HTTP {response.status_code}: {body}"
+                    )
+
+                    if response.status_code != 400:
+                        break
+
                 return None
-                
+
             except Exception as e:
-                logging.error(f"Azure OpenAI call failed: {str(e)}")
+                logging.error(f"Azure OpenAI call failed (deployment={self.deployment_name}): {str(e)}")
                 return None
-        
+
         return await loop.run_in_executor(self.executor, make_request)
 
     def analyze_ticket_requirement(self, question: str, ai_response: str) -> bool:
