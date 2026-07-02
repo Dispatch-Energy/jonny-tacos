@@ -36,6 +36,8 @@ class QuickBaseManager:
         
         # Field mappings from your QuickBase schema
         self.field_mapping = {
+            'record_id': 3,          # __Record ID#__ (built-in key; must be selected
+                                     #   so updates resolve a real key and don't upsert-insert)
             'ticket_number': 6,      # __Ticket Number__
             'subject': 7,             # __Subject__
             'description': 8,         # __Description__
@@ -333,7 +335,16 @@ class QuickBaseManager:
                 return False
             
             record_id = ticket.get('record_id')
-            
+            if not record_id:
+                # Without a real key, a POST to /records is an INSERT, not an
+                # update — that silently creates a blank ticket. Refuse instead.
+                logging.error(
+                    "Refusing ticket update: no record_id resolved for %r; "
+                    "would have inserted a blank ticket.",
+                    ticket_update.get('ticket_id') or ticket_update.get('record_id')
+                )
+                return False
+
             # Prepare update data
             update_data = {
                 "to": self.table_id,
