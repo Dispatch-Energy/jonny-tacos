@@ -43,10 +43,23 @@ def get_llm(temperature: float = 0.3) -> ChatOpenAI:
     endpoint = os.getenv("GPT5_ENDPOINT", "")
     api_key = os.getenv("GPT5_API_KEY", "")
     model = os.getenv("GPT5_MODEL", "gpt-4")
-    
+
     if not endpoint or not api_key:
         logging.warning("GPT5_ENDPOINT or GPT5_API_KEY not set!")
-    
+
+    # Newer OpenAI reasoning models (gpt-5 class) reject any non-default
+    # 'temperature' with a 400 ("Only the default (1) value is supported").
+    # That 400 was silently swallowed by the router/solution try/except and
+    # collapsed every request to the quick_fix / fallback path, so status
+    # checks never fired. Force the supported default for those models.
+    if 'gpt-5' in model.lower():
+        if temperature != 1:
+            logging.debug(
+                "Model %s only supports default temperature; overriding %s -> 1",
+                model, temperature
+            )
+        temperature = 1
+
     # Configure for custom endpoint - use older parameter names
     return ChatOpenAI(
         model=model,
