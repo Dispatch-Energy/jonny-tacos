@@ -196,6 +196,7 @@ All variables are set in `local.settings.json` for local dev or as Application S
 | `QB_APP_ID` | QuickBase application ID |
 | `QB_TICKETS_TABLE_ID` | Table ID for the tickets table |
 | `QB_WEBHOOK_SECRET` | (Optional) Secret for validating webhook payloads |
+| `QB_TICKET_REQUESTER_ROLE_NAME` | (Optional) Role in `QB_APP_ID` that submitters are added to on ticket creation so they can view their own tickets. Default `Ticket Requester`; users who already hold a role are left alone |
 
 ### AI Configuration (Required - at least one provider)
 

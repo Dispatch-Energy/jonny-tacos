@@ -26,7 +26,12 @@ class QuickBaseManager:
             'QB_USER_CREATION_USER_TOKEN',
             self.user_token
         )
-        
+        # Role in the tickets app that can view only the tickets they submitted
+        self.ticket_requester_role_name = os.environ.get(
+            'QB_TICKET_REQUESTER_ROLE_NAME',
+            'Ticket Requester'
+        )
+
         self.base_url = f"https://api.quickbase.com/v1"
         self.headers = {
             'QB-Realm-Hostname': self.realm,
@@ -94,6 +99,7 @@ class QuickBaseManager:
         
         self.executor = ThreadPoolExecutor(max_workers=5)
         self._role_id_cache: Dict[str, Dict[str, str]] = {}
+        self._ticket_requester_checked: set = set()
 
     async def create_ticket(self, ticket_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -187,6 +193,11 @@ class QuickBaseManager:
                     }
                     
                     logging.info(f"Ticket created successfully: {ticket_number}")
+
+                    # Let the submitter see their own tickets in QuickBase
+                    if user_email:
+                        await self.ensure_ticket_requester_access(user_email)
+
                     return ticket
                 else:
                     # Check for line errors
@@ -652,8 +663,13 @@ class QuickBaseManager:
                     data=payload,
                     timeout=30,
                 )
+                if response.text:
+                    try:
+                        return ElementTree.fromstring(response.text)
+                    except ElementTree.ParseError:
+                        pass
                 response.raise_for_status()
-                return ElementTree.fromstring(response.text)
+                return None
             except Exception as e:
                 logging.error(f"QuickBase legacy API request failed ({action}): {str(e)}")
                 return None
@@ -682,6 +698,11 @@ class QuickBaseManager:
 
         errcode = self._legacy_text(root, 'errcode')
         if errcode == '0':
+            user_node = root.find('user')
+            if user_node is not None:
+                user_id = (user_node.get('id') or '').strip()
+                if user_id:
+                    return user_id
             return self._legacy_text(root, 'userid') or self._legacy_text(root, 'uid')
 
         logging.info(
@@ -690,7 +711,12 @@ class QuickBaseManager:
         )
         return None
 
-    async def get_app_role_id(self, app_id: str, role_name: str) -> Optional[str]:
+    async def get_app_role_id(
+        self,
+        app_id: str,
+        role_name: str,
+        user_token: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Resolve a role name to its QuickBase role ID for an application.
         """
@@ -702,7 +728,7 @@ class QuickBaseManager:
             'API_GetRoleInfo',
             app_id,
             {},
-            user_token=self.user_creation_user_token,
+            user_token=user_token or self.user_creation_user_token,
         )
         if root is None:
             return None
@@ -789,5 +815,72 @@ class QuickBaseManager:
                 'user_id': self._legacy_text(root, 'userid') or self._legacy_text(root, 'uid'),
                 'provisioned': True,
             }
-
         return {'success': False, 'error': errtext or f'QuickBase errcode {errcode}'}
+
+    async def ensure_ticket_requester_access(self, email: str) -> Dict[str, Any]:
+        """
+        Add a ticket submitter to the tickets app's requester role so they can
+        view their own tickets. Users who already hold any role in the app are
+        left alone so nobody is downgraded. Never raises.
+        """
+        email = (email or '').strip().lower()
+        if not email or not self.ticket_requester_role_name:
+            return {'success': False, 'error': 'No email or requester role configured'}
+        if email in self._ticket_requester_checked:
+            return {'success': True, 'skipped': 'already checked'}
+
+        try:
+            user_id = await self.get_quickbase_user_id(email)
+            if not user_id:
+                # Not a QuickBase user; don't provision a new account just for a ticket
+                return {'success': False, 'error': f'No QuickBase user for {email}'}
+
+            root = await self.execute_legacy_api(
+                'API_GetUserRole',
+                self.app_id,
+                {'userid': user_id, 'inclgrps': 1},
+            )
+            if root is None or self._legacy_text(root, 'errcode') != '0':
+                return {
+                    'success': False,
+                    'error': self._legacy_text(root, 'errtext') or 'API_GetUserRole failed',
+                }
+
+            existing_roles = [
+                (role.findtext('name') or '').strip()
+                for role in root.findall('.//role')
+            ]
+            if existing_roles:
+                self._ticket_requester_checked.add(email)
+                return {'success': True, 'skipped': 'has role', 'roles': existing_roles}
+
+            role_id = await self.get_app_role_id(
+                self.app_id,
+                self.ticket_requester_role_name,
+                user_token=self.user_token,
+            )
+            if not role_id:
+                logging.error(
+                    f"Could not resolve QuickBase role '{self.ticket_requester_role_name}' "
+                    f"in app {self.app_id}"
+                )
+                return {'success': False, 'error': 'Requester role not found'}
+
+            root = await self.execute_legacy_api(
+                'API_AddUserToRole',
+                self.app_id,
+                {'userid': user_id, 'roleid': role_id},
+            )
+            errcode = self._legacy_text(root, 'errcode')
+            errtext = self._legacy_text(root, 'errtext')
+            if errcode == '0' or 'already' in errtext.lower():
+                self._ticket_requester_checked.add(email)
+                logging.info(f"Added {email} to '{self.ticket_requester_role_name}' role")
+                return {'success': True, 'user_id': user_id, 'role_id': role_id}
+
+            logging.warning(f"Could not add {email} to requester role: {errtext or errcode}")
+            return {'success': False, 'error': errtext or f'QuickBase errcode {errcode}'}
+
+        except Exception as e:
+            logging.error(f"Error granting ticket requester access to {email}: {str(e)}")
+            return {'success': False, 'error': str(e)}
